@@ -1,0 +1,43 @@
+export const channels = Object.freeze({
+  getState: "chroma:get-state",
+  smokeViewports: "chroma:smoke-viewports",
+  stateChanged: "chroma:state-changed",
+  layoutChanged: "chroma:layout-changed",
+  sidebarOverlayChanged: "chroma:sidebar-overlay-changed",
+  chromeModalChanged: "chroma:chrome-modal-changed",
+  tabDragChanged: "chroma:tab-drag-changed",
+  windowDragStart: "chroma:window-drag-start",
+  windowDragMove: "chroma:window-drag-move",
+  windowDragEnd: "chroma:window-drag-end",
+  windowControl: "chroma:window-control",
+  invoke: "chroma:invoke",
+});
+
+export const commands = Object.freeze({
+  createTab: "tab:create",
+  selectTab: "tab:select",
+  closeTab: "tab:close",
+  reopenTab: "tab:reopen",
+  reorderTab: "tab:reorder",
+  navigate: "navigation:go",
+  back: "navigation:back",
+  forward: "navigation:forward",
+  reload: "navigation:reload",
+  stop: "navigation:stop",
+  toggleMute: "tab:toggle-mute",
+  toggleEssential: "tab:toggle-essential",
+  createWorkspace: "workspace:create",
+  selectWorkspace: "workspace:select",
+  renameWorkspace: "workspace:rename",
+  splitActive: "split:active",
+  splitTabs: "split:tabs",
+  detachSplitTab: "split:detach",
+  unsplitActive: "split:remove",
+  createFolder: "folder:create",
+  toggleFolder: "folder:toggle",
+  toggleSidebar: "sidebar:toggle",
+  setSidebarWidth: "sidebar:set-width",
+  openDevTools: "developer:open-tools",
+});
+
+export const commandNames = new Set(Object.values(commands));

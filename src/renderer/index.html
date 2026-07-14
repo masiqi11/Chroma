@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; img-src 'self' https: http: data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'"
+    />
+    <title>Chroma</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div id="app" class="app is-loading">
+      <div class="window-material" aria-hidden="true"></div>
+
+      <button
+        id="sidebar-peek-trigger"
+        class="sidebar-peek-trigger"
+        type="button"
+        aria-label="Show sidebar"
+        title="Show sidebar"
+      ></button>
+
+      <aside id="sidebar" class="sidebar">
+        <div class="sidebar-topbar">
+          <div class="traffic-lights" role="group" aria-label="Window controls">
+            <button class="traffic-light is-close" data-action="window-close" title="Close" aria-label="Close window"></button>
+            <button class="traffic-light is-minimize" data-action="window-minimize" title="Minimize" aria-label="Minimize window"></button>
+            <button class="traffic-light is-maximize" data-action="window-maximize" title="Maximize" aria-label="Maximize window"></button>
+          </div>
+          <button class="icon-button sidebar-header-toggle" data-action="toggle-sidebar" title="Collapse sidebar" aria-label="Collapse sidebar"></button>
+          <span class="topbar-spacer" aria-hidden="true"></span>
+          <nav class="navigation-toolbar" aria-label="Navigation">
+            <button class="icon-button" data-action="back" title="Back" aria-label="Back" disabled></button>
+            <button class="icon-button" data-action="forward" title="Forward" aria-label="Forward" disabled></button>
+            <button class="icon-button" data-action="reload" title="Reload" aria-label="Reload"></button>
+          </nav>
+        </div>
+
+        <form id="address-form" class="address-form">
+          <span id="site-indicator" class="site-indicator" aria-hidden="true"></span>
+          <input id="address-input" type="text" inputmode="url" autocomplete="off" spellcheck="false" aria-label="Address and search" placeholder="Search or enter address" />
+          <span id="loading-indicator" class="loading-indicator" aria-hidden="true"></span>
+        </form>
+
+        <div id="address-results" class="address-results" hidden></div>
+
+        <header class="workspace-header">
+          <button id="workspace-title" class="workspace-title" data-action="workspace-menu" title="Current space"></button>
+          <div class="workspace-actions">
+            <button class="icon-button subtle" data-action="split-row" title="Split side by side" aria-label="Split side by side"></button>
+            <button class="icon-button subtle" data-action="downloads" title="Downloads" aria-label="Downloads"></button>
+          </div>
+        </header>
+
+        <section id="essentials-section" class="essentials-section" aria-label="Essentials">
+          <div id="essentials-grid" class="essentials-grid"></div>
+        </section>
+
+        <div class="tab-list-toolbar">
+          <button class="new-tab-button" data-action="new-tab">
+            <span class="button-icon" data-icon-slot="plus"></span>
+            <span class="button-label">New Tab</span>
+          </button>
+          <button class="icon-button subtle" data-action="new-folder" title="New folder" aria-label="New folder"></button>
+        </div>
+
+        <div id="tabs-scroll" class="tabs-scroll">
+          <div id="tabs-list" class="tabs-list" role="tablist" aria-label="Open tabs"></div>
+        </div>
+
+        <footer class="sidebar-footer">
+          <div id="workspace-switcher" class="workspace-switcher" aria-label="Spaces"></div>
+          <button class="icon-button footer-action" data-action="new-workspace" title="New space" aria-label="New space"></button>
+        </footer>
+
+        <div id="sidebar-resizer" class="sidebar-resizer" role="separator" aria-orientation="vertical" aria-label="Resize sidebar"></div>
+      </aside>
+
+      <main id="content-shell" class="content-shell" aria-label="Web content">
+        <div id="split-drop-overlay" class="split-drop-overlay" hidden>
+          <div id="split-drop-preview" class="split-drop-preview">
+            <span id="split-drop-label">Split right</span>
+          </div>
+        </div>
+        <div id="content-viewport" class="content-viewport">
+          <div id="pane-frame-layer" class="pane-frame-layer" aria-hidden="true"></div>
+        </div>
+        <div id="empty-state" class="empty-state" hidden>
+          <div class="empty-logo">C</div>
+          <p>Select a tab to begin</p>
+        </div>
+      </main>
+
+      <div id="popover-layer" class="popover-layer" aria-live="polite"></div>
+      <div id="toast-layer" class="toast-layer" aria-live="polite"></div>
+      <div id="tab-drag-chip" class="tab-drag-chip" aria-hidden="true" hidden></div>
+
+      <dialog id="text-prompt" class="text-prompt" aria-labelledby="text-prompt-title">
+        <form id="text-prompt-form" class="text-prompt-form">
+          <h2 id="text-prompt-title"></h2>
+          <label id="text-prompt-label" for="text-prompt-input"></label>
+          <input id="text-prompt-input" type="text" maxlength="80" autocomplete="off" />
+          <div class="text-prompt-actions">
+            <button id="text-prompt-cancel" type="button" class="prompt-button secondary">Cancel</button>
+            <button id="text-prompt-submit" type="submit" class="prompt-button primary">Create</button>
+          </div>
+        </form>
+      </dialog>
+    </div>
+
+    <script type="module" src="./shell.mjs"></script>
+  </body>
+</html>

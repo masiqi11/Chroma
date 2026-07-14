@@ -1,0 +1,30 @@
+{
+  "name": "chroma-browser",
+  "productName": "Chroma",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "An Arc-inspired Chromium browser, rewritten from scratch with Zen-like workflows",
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/masiqi11/Chroma#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/masiqi11/Chroma.git"
+  },
+  "bugs": {
+    "url": "https://github.com/masiqi11/Chroma/issues"
+  },
+  "main": "src/main/main.mjs",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test test/*.test.mjs",
+    "check": "node --check src/main/main.mjs && node --check src/main/browser-controller.mjs && node --check src/preload/shell-preload.cjs && npm test",
+    "smoke": "node scripts/runtime-smoke.mjs"
+  },
+  "devDependencies": {
+    "electron": "43.1.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
