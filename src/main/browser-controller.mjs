@@ -11,17 +11,38 @@ import {
   webContents,
 } from "electron";
 
-import { commands } from "../shared/channels.mjs";
-import { splitPaneRects } from "../shared/layout.mjs";
+import { channels, commands } from "../shared/channels.mjs";
+import { APPEARANCE_THEMES } from "../shared/appearance.mjs";
+import {
+  createSplitLayout,
+  insertSplitPane,
+  removeSplitPane,
+  sanitizeSplitLayout,
+  setSplitRatio,
+  splitDividerAtPath,
+  splitLayoutPaneIds,
+  splitLayoutRects,
+  swapSplitPanes,
+} from "../shared/split-ratios.mjs";
 import {
   isSafePageUrl,
   normalizeNavigationInput,
 } from "../shared/navigation.mjs";
-import { normalizeWorkspaceColor } from "../shared/model.mjs";
+import {
+  TAB_COUNT_LIMIT,
+  TAB_URL_MAX_LENGTH,
+  normalizeTabFavicon,
+  normalizeWorkspaceColor,
+} from "../shared/model.mjs";
+import {
+  FOLDER_MEMBER_LIMIT,
+  LIBRARY_CONTAINER_LIMIT,
+} from "../shared/state-invariants.mjs";
+import { createDownloadService } from "./download-service.mjs";
+import { createHistoryService } from "./history-service.mjs";
 import { installInternalProtocol } from "./internal-pages.mjs";
 
 const MAX_CLOSED_TABS = 25;
-const MAX_HISTORY_ITEMS = 1000;
 const SIDEBAR_OVERLAY_INSET = 5;
 const SIDEBAR_OVERLAY_SHADOW_SPACE = 10;
 const SIDEBAR_OVERLAY_ANIMATION_MS = 170;
@@ -36,6 +57,7 @@ const ADAPTIVE_LAYOUT_DELAY_MS = 160;
 const ADAPTIVE_LAYOUT_MAX_WIDTH = 960;
 const ADAPTIVE_OVERFLOW_RATIO = 1.28;
 const ADAPTIVE_OVERFLOW_PIXELS = 160;
+const APPEARANCE_THEME_SET = new Set(APPEARANCE_THEMES);
 const ALLOWED_PERMISSIONS = new Set([
   "media",
   "geolocation",
@@ -45,6 +67,79 @@ const ALLOWED_PERMISSIONS = new Set([
   "fullscreen",
   "pointerLock",
 ]);
+const MEDIA_PERMISSION_TYPES = new Set(["audio", "video"]);
+
+function denyPermissionRequest(_webContents, _permission, callback) {
+  callback(false);
+}
+
+function denyPermissionCheck() {
+  return false;
+}
+
+function denyDevicePermission() {
+  return false;
+}
+
+function normalizedMediaTypes(details) {
+  if (!Array.isArray(details?.mediaTypes) || !details.mediaTypes.length) {
+    return null;
+  }
+  const types = [...new Set(details.mediaTypes)];
+  if (
+    types.length > MEDIA_PERMISSION_TYPES.size ||
+    !types.every(type => MEDIA_PERMISSION_TYPES.has(type))
+  ) {
+    return null;
+  }
+  return types.sort((left, right) =>
+    Number(left === "video") - Number(right === "video")
+  );
+}
+
+function mediaPermissionLabel(types) {
+  if (types.length === 2) return "the microphone and camera";
+  return types[0] === "audio" ? "the microphone" : "the camera";
+}
+
+function safeErrorCode(error) {
+  const code = typeof error?.code === "string" || Number.isInteger(error?.code)
+    ? String(error.code)
+    : "UNKNOWN";
+  return /^[A-Z\d_-]{1,80}$/i.test(code) ? code : "UNKNOWN";
+}
+
+function normalizeRuntimePageUrl(value) {
+  if (
+    typeof value !== "string" ||
+    value.length > TAB_URL_MAX_LENGTH
+  ) {
+    return null;
+  }
+  try {
+    const url = new URL(value.trim());
+    if (["http:", "https:"].includes(url.protocol)) {
+      url.username = "";
+      url.password = "";
+    } else if (url.protocol !== "chroma:") {
+      return null;
+    }
+    return url.href.length <= TAB_URL_MAX_LENGTH ? url.href : null;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeRequestedPageUrl(input) {
+  const value = typeof input === "string" ? input : String(input ?? "");
+  if (value.length > TAB_URL_MAX_LENGTH) return "chroma://newtab/";
+  return normalizeRuntimePageUrl(normalizeNavigationInput(value)) ||
+    "chroma://newtab/";
+}
+
+function normalizeCommittedPageUrl(value) {
+  return isSafePageUrl(value) ? normalizeRuntimePageUrl(value) : null;
+}
 
 function activeModifier(input) {
   return process.platform === "darwin" ? input.meta : input.control;
@@ -96,16 +191,22 @@ export class BrowserController {
   #views = new Map();
   #viewReady = new Map();
   #navigationVersions = new Map();
+  #historyNavigationVersions = new Map();
+  #historyRecordByTab = new Map();
+  #historyNextTransitions = new Map();
+  #historyService;
+  #downloadService;
   #adaptiveViews = new Map();
   #desktopUserAgent = "";
   #mobileUserAgent = mobileUserAgent();
   #contentBounds = null;
   #closedTabs = [];
-  #configuredSessions = new WeakSet();
+  #configuredSessions = new Map();
   #chromeModalOpen = false;
   #chromeModalUsesOverlay = false;
   #tabDragActive = false;
   #tabDragUsesOverlay = false;
+  #splitLayoutPreviews = new Map();
   #sidebarOverlayView = null;
   #sidebarOverlayBounds = null;
   #sidebarOverlayOpen = false;
@@ -117,6 +218,7 @@ export class BrowserController {
   #sidebarOverlayOutsideSince = 0;
   #registerShellWebContents;
   #unregisterShellWebContents;
+  #applyAppearance;
   #acceptCommands = true;
   #commandQueue = Promise.resolve();
   #destroyPromise = null;
@@ -129,13 +231,31 @@ export class BrowserController {
     {
       registerShellWebContents = () => {},
       unregisterShellWebContents = () => {},
+      applyAppearance = () => {},
     } = {}
   ) {
     this.#window = browserWindow;
     this.#state = state;
     this.#store = stateStore;
+    this.#historyService = createHistoryService(this.#state.history);
+    this.#downloadService = createDownloadService(this.#state.downloads, {
+      onChange: () => {
+        if (!this.#destroying) this.#notify(false);
+      },
+      persist: () => {
+        this.#store.scheduleSave(this.#state);
+      },
+      openPath: filePath => shell.openPath(filePath),
+      revealPath: filePath => {
+        shell.showItemInFolder(filePath);
+        return true;
+      },
+    });
     this.#registerShellWebContents = registerShellWebContents;
     this.#unregisterShellWebContents = unregisterShellWebContents;
+    this.#applyAppearance = typeof applyAppearance === "function"
+      ? applyAppearance
+      : () => {};
   }
 
   get state() {
@@ -143,6 +263,9 @@ export class BrowserController {
   }
 
   async initialize() {
+    this.#applyAppearance({ ...this.#state.settings.appearance });
+    const { prunedCount } = this.#historyService.prune();
+    if (prunedCount) this.#store.scheduleSave(this.#state);
     for (const tab of this.#state.tabs) {
       if (!this.#views.has(tab.id)) this.#createView(tab);
     }
@@ -155,8 +278,18 @@ export class BrowserController {
     const liveWebContents = webContents
       .getAllWebContents()
       .filter(contents => !contents.isDestroyed());
+    const { history, ...stateWithoutHistory } = this.#state;
+    const publicState = structuredClone(stateWithoutHistory);
     return {
-      ...structuredClone(this.#state),
+      ...publicState,
+      downloads: this.#downloadService.snapshot(),
+      historyRevision: history?.revision ?? 0,
+      historyCount: history?.entries?.length ?? 0,
+      historyPreferences: {
+        recordingEnabled: history?.preferences?.recordingEnabled === true,
+        retentionDays: history?.preferences?.retentionDays ?? 90,
+        clearOnExit: history?.preferences?.clearOnExit === true,
+      },
       runtime: {
         chromiumVersion: process.versions.chrome,
         electronVersion: process.versions.electron,
@@ -168,6 +301,7 @@ export class BrowserController {
         sidebarOverlayOpen: this.#sidebarOverlayOpen,
         sidebarOverlayVisible: Boolean(this.#sidebarOverlayView?.getVisible()),
         sidebarOverlayReady: this.#sidebarOverlayReady,
+        canReopenTab: this.#closedTabs.length > 0,
         sidebarOverlayBounds: this.#sidebarOverlayView
           ? this.#sidebarOverlayView.getBounds()
           : null,
@@ -245,7 +379,23 @@ export class BrowserController {
     return operation;
   }
 
+  #runDetached(operation, context) {
+    void Promise.resolve(operation).catch(error => {
+      if (
+        this.#destroying ||
+        error?.code === "ERR_ABORTED" ||
+        String(error?.message || "").includes("Browser window is closing")
+      ) {
+        return;
+      }
+      console.warn(`${context}:`, error);
+    });
+  }
+
   #dispatchNow(command, payload) {
+    if (!this.#acceptCommands || this.#destroying) {
+      throw new Error("Browser window is closing");
+    }
     switch (command) {
       case commands.createTab:
         return this.createTab(payload);
@@ -259,7 +409,8 @@ export class BrowserController {
         return this.reorderTab(
           payload.id,
           payload.targetId || payload.beforeId || null,
-          payload.position
+          payload.position,
+          Object.hasOwn(payload, "folderId") ? payload.folderId : undefined
         );
       case commands.navigate:
         return this.navigate(payload.id, payload.input);
@@ -273,8 +424,40 @@ export class BrowserController {
         return this.stop(payload.id);
       case commands.toggleMute:
         return this.toggleMute(payload.id);
+      case commands.togglePin:
+        return this.togglePin(payload.id);
       case commands.toggleEssential:
         return this.toggleEssential(payload.id);
+      case commands.toggleBookmark:
+        return this.toggleBookmark(payload.id);
+      case commands.removeBookmark:
+        return this.removeBookmark(payload.id);
+      case commands.queryHistory:
+        return this.queryHistory(payload);
+      case commands.suggestHistory:
+        return this.suggestHistory(payload);
+      case commands.removeHistory:
+        return this.removeHistory(payload);
+      case commands.clearHistory:
+        return this.clearHistory(payload);
+      case commands.setHistoryPreferences:
+        return this.setHistoryPreferences(payload);
+      case commands.openHistory:
+        return this.openHistory();
+      case commands.pauseDownload:
+        return this.#downloadService.pause(payload.id);
+      case commands.resumeDownload:
+        return this.#downloadService.resume(payload.id);
+      case commands.cancelDownload:
+        return this.#downloadService.cancel(payload.id);
+      case commands.openDownload:
+        return this.#downloadService.open(payload.id);
+      case commands.revealDownload:
+        return this.#downloadService.reveal(payload.id);
+      case commands.removeDownload:
+        return this.#downloadService.remove(payload.id);
+      case commands.clearDownloads:
+        return this.#downloadService.clearFinished();
       case commands.createWorkspace:
         return this.createWorkspace(payload);
       case commands.selectWorkspace:
@@ -295,18 +478,27 @@ export class BrowserController {
           payload.id,
           payload.targetId || null,
           payload.position,
-          payload.moveToEnd === true
+          payload.moveToEnd === true,
+          Object.hasOwn(payload, "folderId") ? payload.folderId : undefined
         );
       case commands.unsplitActive:
         return this.unsplitActive();
+      case commands.setSplitRatio:
+        return this.commitSplitRatio(payload);
       case commands.createFolder:
         return this.createFolder(payload);
       case commands.toggleFolder:
         return this.toggleFolder(payload.id);
+      case commands.renameFolder:
+        return this.renameFolder(payload.id, payload.name);
+      case commands.deleteFolder:
+        return this.deleteFolder(payload.id);
       case commands.toggleSidebar:
         return this.toggleSidebar();
       case commands.setSidebarWidth:
         return this.setSidebarWidth(payload.width);
+      case commands.setAppearance:
+        return this.setAppearance(payload);
       case commands.openDevTools:
         return this.openDevTools(payload.id);
       default:
@@ -379,6 +571,18 @@ export class BrowserController {
     }
   }
 
+  openCommandPalette() {
+    if (
+      this.#destroying ||
+      this.#window.isDestroyed() ||
+      this.#window.webContents.isDestroyed()
+    ) {
+      return false;
+    }
+    this.#window.webContents.send(channels.openCommandPalette);
+    return true;
+  }
+
   windowControl(action) {
     if (this.#window.isDestroyed()) return false;
     if (action === "close") {
@@ -409,6 +613,53 @@ export class BrowserController {
     this.#syncVisibleViews();
   }
 
+  previewSplitRatio({ groupId, path, ratio, cancel = false } = {}) {
+    const group = this.#state.splitGroups.find(item => item.id === groupId);
+    if (!group || this.#splitForTab(this.#state.activeTabId)?.id !== group.id) {
+      return false;
+    }
+    if (cancel) {
+      const removed = this.#splitLayoutPreviews.delete(group.id);
+      if (removed) this.#syncVisibleViews();
+      return removed;
+    }
+    const layout = this.#normalizedGroupLayout(group);
+    if (
+      !Array.isArray(path) ||
+      path.length > 8 ||
+      !path.every(part => part === "first" || part === "second") ||
+      typeof ratio !== "number" ||
+      !Number.isFinite(ratio) ||
+      !splitDividerAtPath(layout, path)
+    ) {
+      return false;
+    }
+    const preview = setSplitRatio(layout, path, ratio);
+    this.#splitLayoutPreviews.set(group.id, preview);
+    this.#syncVisibleViews();
+    return true;
+  }
+
+  commitSplitRatio({ groupId, path, ratio } = {}) {
+    const group = this.#state.splitGroups.find(item => item.id === groupId);
+    const layout = group ? this.#normalizedGroupLayout(group) : null;
+    if (
+      !group ||
+      this.#splitForTab(this.#state.activeTabId)?.id !== group.id ||
+      !Array.isArray(path) ||
+      path.length > 8 ||
+      !path.every(part => part === "first" || part === "second") ||
+      typeof ratio !== "number" ||
+      !Number.isFinite(ratio) ||
+      !splitDividerAtPath(layout, path)
+    ) {
+      return false;
+    }
+    this.#applyGroupLayout(group, setSplitRatio(layout, path, ratio));
+    this.#commit();
+    return true;
+  }
+
   async createTab({
     url = "chroma://newtab/",
     workspaceId = this.#state.activeWorkspaceId,
@@ -416,18 +667,18 @@ export class BrowserController {
     essential = false,
     pinned = false,
   } = {}) {
+    if (this.#state.tabs.length >= TAB_COUNT_LIMIT) return null;
     const workspace = this.#workspace(workspaceId) || this.#activeWorkspace();
-    const normalizedUrl = isSafePageUrl(url)
-      ? new URL(url).href
-      : normalizeNavigationInput(url);
+    const normalizedUrl = normalizeRequestedPageUrl(url);
+    const isEssential = Boolean(essential);
     const tab = {
       id: randomUUID(),
       workspaceId: workspace.id,
       url: normalizedUrl,
       title: normalizedUrl.startsWith("chroma://newtab") ? "New Tab" : "Loading…",
       favicon: "",
-      essential: Boolean(essential),
-      pinned: Boolean(pinned),
+      essential: isEssential,
+      pinned: isEssential || Boolean(pinned),
       muted: false,
       audible: false,
       loading: true,
@@ -462,26 +713,58 @@ export class BrowserController {
     const tab = this.#tab(id);
     if (!tab) return false;
 
+    const wasActive = this.#state.activeTabId === tab.id;
+    const split = this.#splitForTab(tab.id);
+    const splitIndex = split?.tabIds.indexOf(tab.id) ?? -1;
+    const preferredSiblingIds = split
+      ? [
+          ...split.tabIds.slice(splitIndex + 1),
+          ...split.tabIds.slice(0, splitIndex).reverse(),
+        ]
+      : [];
     this.#closedTabs.unshift(tabSnapshot(tab));
     this.#closedTabs.length = Math.min(this.#closedTabs.length, MAX_CLOSED_TABS);
-    this.#removeTabFromFoldersAndSplits(tab.id);
-    this.#state.tabs = this.#state.tabs.filter(item => item.id !== tab.id);
-    await this.#destroyView(tab.id);
 
-    const remaining = this.#tabsForWorkspace(tab.workspaceId);
+    let remaining = this.#tabsForWorkspace(tab.workspaceId).filter(
+      item => item.id !== tab.id
+    );
+    let removedForCapacity = false;
     if (!remaining.length) {
+      if (this.#state.tabs.length >= TAB_COUNT_LIMIT) {
+        this.#removeTabFromFoldersAndSplits(tab.id);
+        this.#state.tabs = this.#state.tabs.filter(item => item.id !== tab.id);
+        removedForCapacity = true;
+      }
       const replacementId = await this.createTab({
         workspaceId: tab.workspaceId,
-        activate: tab.workspaceId === this.#state.activeWorkspaceId,
+        activate: wasActive,
       });
-      if (this.#state.activeTabId === tab.id) this.#state.activeTabId = replacementId;
-    } else if (this.#state.activeTabId === tab.id) {
-      const next = remaining.sort((a, b) => b.lastActiveAt - a.lastActiveAt)[0];
-      this.#state.activeTabId = next.id;
+      if (!replacementId) return false;
+      remaining = this.#tabsForWorkspace(tab.workspaceId).filter(
+        item => item.id !== tab.id
+      );
     }
 
+    if (wasActive) {
+      const preferred = preferredSiblingIds
+        .map(siblingId => remaining.find(item => item.id === siblingId))
+        .find(Boolean);
+      const next = preferred || [...remaining].sort(
+        (left, right) => right.lastActiveAt - left.lastActiveAt
+      )[0];
+      this.#state.activeWorkspaceId = next.workspaceId;
+      this.#state.activeTabId = next.id;
+      next.lastActiveAt = Date.now();
+    }
+
+    if (!removedForCapacity) {
+      this.#removeTabFromFoldersAndSplits(tab.id);
+      this.#state.tabs = this.#state.tabs.filter(item => item.id !== tab.id);
+    }
     this.#commit();
     this.#focusTab(this.#state.activeTabId);
+    await this.#destroyView(tab.id);
+    this.#notify(false);
     return true;
   }
 
@@ -499,36 +782,79 @@ export class BrowserController {
     });
   }
 
-  reorderTab(id, targetId = null, position = "before") {
-    if (!this.#reorderTabState(id, targetId, position)) return false;
+  reorderTab(id, targetId = null, position = "before", folderId = undefined) {
+    if (!this.#reorderTabState(id, targetId, position, folderId)) return false;
     this.#commit();
     return true;
   }
 
-  #reorderTabState(id, targetId = null, position = "before") {
-    const tab = this.#tab(id);
+  #resolveTabMoveDestination(tab, targetId, folderId) {
+    if (!tab || tab.essential || tab.pinned) return null;
     const target = targetId ? this.#tab(targetId) : null;
-    if (!tab || (target && (
-      target.workspaceId !== tab.workspaceId ||
-      target.id === tab.id
-    ))) {
-      return false;
+    if (
+      (targetId && !target) ||
+      (target && (
+        target.essential ||
+        target.pinned ||
+        target.workspaceId !== tab.workspaceId ||
+        target.id === tab.id
+      ))
+    ) {
+      return null;
     }
-    const insertion = position === "after" ? "after" : "before";
-    const targetFolderId = target
+    const targetGroup = target ? this.#splitForTab(target.id) : null;
+    const targetBoundaryIds = targetGroup
+      ? targetGroup.tabIds
+      : target
+        ? [target.id]
+        : [];
+    const inferredFolder = target
       ? this.#state.folders.find(folder => folder.tabIds.includes(target.id))?.id
       : null;
+    let targetFolder = null;
+    if (folderId === undefined) {
+      targetFolder = inferredFolder
+        ? this.#state.folders.find(folder => folder.id === inferredFolder) || null
+        : null;
+    } else if (folderId !== null) {
+      if (!validId(folderId)) return null;
+      targetFolder = this.#state.folders.find(folder => folder.id === folderId) || null;
+      if (!targetFolder || targetFolder.workspaceId !== tab.workspaceId) return null;
+    }
+
+    if (target) {
+      const expectedFolderId = targetFolder?.id || null;
+      if ((inferredFolder || null) !== expectedFolderId) return null;
+      if (targetGroup && targetGroup.tabIds.some(tabId => {
+        const memberFolderId = this.#state.folders.find(folder =>
+          folder.tabIds.includes(tabId)
+        )?.id || null;
+        return memberFolderId !== expectedFolderId;
+      })) {
+        return null;
+      }
+    }
+
+    return { target, targetFolder, targetBoundaryIds };
+  }
+
+  #applyResolvedTabMove(tab, destination, position = "before") {
+    const { target, targetFolder, targetBoundaryIds } = destination;
+    const insertion = position === "after" ? "after" : "before";
     for (const folder of this.#state.folders) {
       folder.tabIds = folder.tabIds.filter(tabId => tabId !== tab.id);
     }
-    this.#state.folders = this.#state.folders.filter(folder => folder.tabIds.length);
-    const targetFolder = targetFolderId
-      ? this.#state.folders.find(folder => folder.id === targetFolderId)
-      : null;
-    if (targetFolder && target) {
-      const targetIndex = targetFolder.tabIds.indexOf(target.id);
+    if (targetFolder) {
+      const targetIndexes = targetBoundaryIds
+        .map(boundaryId => targetFolder.tabIds.indexOf(boundaryId))
+        .filter(index => index >= 0);
+      const targetIndex = !target || !targetIndexes.length
+        ? targetFolder.tabIds.length
+        : insertion === "after"
+          ? Math.max(...targetIndexes)
+          : Math.min(...targetIndexes);
       targetFolder.tabIds.splice(
-        insertion === "after" ? targetIndex + 1 : targetIndex,
+        target && insertion === "after" ? targetIndex + 1 : targetIndex,
         0,
         tab.id
       );
@@ -543,13 +869,17 @@ export class BrowserController {
         ordered.push(item);
       }
     });
-    const from = ordered.findIndex(item => item.id === id);
+    const from = ordered.findIndex(item => item.id === tab.id);
     if (from < 0) return false;
     const [moved] = ordered.splice(from, 1);
-    const targetIndex = target ? ordered.findIndex(item => item.id === target.id) : -1;
-    const insertionIndex = targetIndex < 0
+    const targetIndexes = targetBoundaryIds
+      .map(boundaryId => ordered.findIndex(item => item.id === boundaryId))
+      .filter(index => index >= 0);
+    const insertionIndex = !target || !targetIndexes.length
       ? ordered.length
-      : targetIndex + (insertion === "after" ? 1 : 0);
+      : insertion === "after"
+        ? Math.max(...targetIndexes) + 1
+        : Math.min(...targetIndexes);
     ordered.splice(insertionIndex, 0, moved);
     workspaceIndexes.forEach((stateIndex, index) => {
       this.#state.tabs[stateIndex] = ordered[index];
@@ -557,11 +887,21 @@ export class BrowserController {
     return true;
   }
 
+  #reorderTabState(id, targetId = null, position = "before", folderId = undefined) {
+    const tab = this.#tab(id);
+    if (!tab || this.#splitForTab(tab.id)) return false;
+    const destination = this.#resolveTabMoveDestination(tab, targetId, folderId);
+    return destination
+      ? this.#applyResolvedTabMove(tab, destination, position)
+      : false;
+  }
+
   navigate(id = this.#state.activeTabId, input) {
     const view = this.#viewFor(id);
     const tab = this.#tab(id);
     if (!view || !tab) return false;
-    const url = normalizeNavigationInput(input);
+    const url = normalizeRequestedPageUrl(input);
+    this.#historyNextTransitions.set(id, "typed");
     const version = (this.#navigationVersions.get(id) || 0) + 1;
     this.#navigationVersions.set(id, version);
     this.#prepareAdaptiveExplicitNavigation(id, view, url);
@@ -578,6 +918,7 @@ export class BrowserController {
     const view = this.#viewFor(id);
     const contents = view?.webContents;
     if (!contents?.navigationHistory.canGoBack()) return false;
+    this.#historyNextTransitions.set(id, "other");
     this.#prepareAdaptiveUserNavigation(id, view);
     contents.navigationHistory.goBack();
     return true;
@@ -587,6 +928,7 @@ export class BrowserController {
     const view = this.#viewFor(id);
     const contents = view?.webContents;
     if (!contents?.navigationHistory.canGoForward()) return false;
+    this.#historyNextTransitions.set(id, "other");
     this.#prepareAdaptiveUserNavigation(id, view);
     contents.navigationHistory.goForward();
     return true;
@@ -596,6 +938,7 @@ export class BrowserController {
     const view = this.#viewFor(id);
     const contents = view?.webContents;
     if (!contents) return false;
+    this.#historyNextTransitions.set(id, "reload");
     this.#prepareAdaptiveUserNavigation(id, view);
     contents.reload();
     return true;
@@ -620,16 +963,103 @@ export class BrowserController {
     return tab.muted;
   }
 
+  togglePin(id = this.#state.activeTabId) {
+    const tab = this.#tab(id);
+    if (!tab || tab.essential) return false;
+    const pinned = !tab.pinned;
+    if (pinned) {
+      this.#removeTabFromFoldersAndSplits(tab.id);
+      const view = this.#viewFor(tab.id);
+      if (view) this.#restoreDesktopLayout(tab.id, view);
+    }
+    tab.pinned = pinned;
+    this.#commit();
+    return pinned;
+  }
+
   toggleEssential(id = this.#state.activeTabId) {
     const tab = this.#tab(id);
     if (!tab) return false;
-    tab.essential = !tab.essential;
-    if (tab.essential) tab.pinned = true;
+    const essential = !tab.essential;
+    if (essential) {
+      this.#removeTabFromFoldersAndSplits(tab.id);
+      const view = this.#viewFor(tab.id);
+      if (view) this.#restoreDesktopLayout(tab.id, view);
+    }
+    tab.essential = essential;
+    if (essential) tab.pinned = true;
     this.#commit();
-    return tab.essential;
+    return essential;
+  }
+
+  toggleBookmark(id = this.#state.activeTabId) {
+    const tab = this.#tab(id);
+    if (!tab || !isWebPageUrl(tab.url)) return false;
+    const url = new URL(tab.url).href;
+    const bookmarks = Array.isArray(this.#state.bookmarks)
+      ? this.#state.bookmarks
+      : (this.#state.bookmarks = []);
+    const existingIndex = bookmarks.findIndex(bookmark => bookmark.url === url);
+    if (existingIndex >= 0) {
+      bookmarks.splice(existingIndex, 1);
+      this.#commit();
+      return false;
+    }
+    bookmarks.push({
+      id: randomUUID(),
+      title: safeTitle(tab.title, url),
+      url,
+      createdAt: Date.now(),
+    });
+    this.#commit();
+    return true;
+  }
+
+  removeBookmark(id) {
+    if (!validId(id) || !Array.isArray(this.#state.bookmarks)) return false;
+    const index = this.#state.bookmarks.findIndex(bookmark => bookmark.id === id);
+    if (index < 0) return false;
+    this.#state.bookmarks.splice(index, 1);
+    this.#commit();
+    return true;
+  }
+
+  queryHistory(payload = {}) {
+    return this.#runHistoryRead(() => this.#historyService.query(payload));
+  }
+
+  suggestHistory(payload = {}) {
+    return this.#runHistoryRead(() => this.#historyService.suggest(payload));
+  }
+
+  removeHistory(payload = {}) {
+    return this.#commitHistoryMutation(() => this.#historyService.remove(payload));
+  }
+
+  clearHistory(payload = {}) {
+    return this.#commitHistoryMutation(() => this.#historyService.clear(payload));
+  }
+
+  setHistoryPreferences(payload = {}) {
+    return this.#commitHistoryMutation(() =>
+      this.#historyService.setPreferences(payload)
+    );
+  }
+
+  openHistory() {
+    if (
+      this.#destroying ||
+      this.#window.isDestroyed() ||
+      this.#window.webContents.isDestroyed()
+    ) {
+      return false;
+    }
+    this.#window.webContents.send(channels.openHistory);
+    return true;
   }
 
   async createWorkspace({ name, icon, color } = {}) {
+    if (this.#state.tabs.length >= TAB_COUNT_LIMIT) return null;
     const palette = ["#e4a8ff", "#8dd7ff", "#a9e6bd", "#ffd28f", "#ff9fba"];
     const workspace = {
       id: randomUUID(),
@@ -674,24 +1104,38 @@ export class BrowserController {
 
   async splitActive(direction = "row") {
     const active = this.#tab(this.#state.activeTabId);
-    if (!active) return null;
+    if (!active || active.essential || active.pinned) return null;
     const existing = this.#splitForTab(active.id);
     if (existing && existing.tabIds.length >= 4) return existing.id;
     const newTabId = await this.createTab({
       workspaceId: active.workspaceId,
       activate: false,
     });
-    if (existing) {
-      existing.tabIds.push(newTabId);
-      existing.direction = existing.tabIds.length > 2 ? "grid" : direction;
+    if (!newTabId) return null;
+    let group = existing;
+    if (group) {
+      this.#applyGroupLayout(
+        group,
+        this.#insertPaneIntoGroup(
+          group,
+          active.id,
+          newTabId,
+          direction,
+          "after"
+        )
+      );
     } else {
-      this.#state.splitGroups.push({
+      const layout = createSplitLayout([active.id, newTabId], direction);
+      group = {
         id: randomUUID(),
         workspaceId: active.workspaceId,
-        direction: ["row", "column"].includes(direction) ? direction : "row",
-        tabIds: [active.id, newTabId],
-      });
+        direction: layout?.direction === "column" ? "column" : "row",
+        tabIds: splitLayoutPaneIds(layout),
+        layout,
+      };
+      this.#state.splitGroups.push(group);
     }
+    this.#coLocateSplitGroup(group, active.id);
     this.#state.activeTabId = newTabId;
     this.#commit();
     this.#focusTab(newTabId);
@@ -704,6 +1148,10 @@ export class BrowserController {
     if (
       !source ||
       !target ||
+      source.essential ||
+      target.essential ||
+      source.pinned ||
+      target.pinned ||
       source.id === target.id ||
       source.workspaceId !== target.workspaceId
     ) {
@@ -713,12 +1161,15 @@ export class BrowserController {
     const sourceGroup = this.#splitForTab(source.id);
     const targetGroup = this.#splitForTab(target.id);
     if (sourceGroup && targetGroup && sourceGroup.id === targetGroup.id) {
-      const sourceIndex = sourceGroup.tabIds.indexOf(source.id);
-      const targetIndex = sourceGroup.tabIds.indexOf(target.id);
-      [sourceGroup.tabIds[sourceIndex], sourceGroup.tabIds[targetIndex]] = [
-        sourceGroup.tabIds[targetIndex],
-        sourceGroup.tabIds[sourceIndex],
-      ];
+      this.#applyGroupLayout(
+        sourceGroup,
+        swapSplitPanes(
+          this.#normalizedGroupLayout(sourceGroup),
+          source.id,
+          target.id
+        )
+      );
+      this.#coLocateSplitGroup(sourceGroup, target.id);
       this.#state.activeWorkspaceId = source.workspaceId;
       this.#state.activeTabId = source.id;
       source.lastActiveAt = Date.now();
@@ -729,42 +1180,55 @@ export class BrowserController {
     if (targetGroup && targetGroup.tabIds.length >= 4) return false;
 
     if (sourceGroup) {
-      sourceGroup.tabIds = sourceGroup.tabIds.filter(id => id !== source.id);
-      if (sourceGroup.tabIds.length < 2) {
+      const sourceLayout = removeSplitPane(
+        this.#normalizedGroupLayout(sourceGroup),
+        source.id
+      );
+      const remainingIds = splitLayoutPaneIds(sourceLayout);
+      if (remainingIds.length < 2) {
         this.#state.splitGroups = this.#state.splitGroups.filter(
           group => group.id !== sourceGroup.id
         );
-        for (const remainingId of sourceGroup.tabIds) {
+        this.#splitLayoutPreviews.delete(sourceGroup.id);
+        for (const remainingId of remainingIds) {
           const remainingView = this.#viewFor(remainingId);
           if (remainingView) {
             this.#restoreDesktopLayout(remainingId, remainingView);
           }
         }
-      } else if (
-        sourceGroup.direction === "grid" &&
-        sourceGroup.tabIds.length === 2
-      ) {
-        sourceGroup.direction = "row";
+      } else {
+        this.#applyGroupLayout(sourceGroup, sourceLayout);
       }
     }
 
     let group = targetGroup;
     if (group) {
-      const targetIndex = group.tabIds.indexOf(target.id);
-      const insertAt = placement === "before" ? targetIndex : targetIndex + 1;
-      group.tabIds.splice(insertAt, 0, source.id);
-      if (group.tabIds.length > 2) group.direction = "grid";
+      this.#applyGroupLayout(
+        group,
+        this.#insertPaneIntoGroup(
+          group,
+          target.id,
+          source.id,
+          direction,
+          placement
+        )
+      );
     } else {
+      const paneIds = placement === "before"
+        ? [source.id, target.id]
+        : [target.id, source.id];
+      const layout = createSplitLayout(paneIds, direction);
       group = {
         id: randomUUID(),
         workspaceId: target.workspaceId,
-        direction: ["row", "column"].includes(direction) ? direction : "row",
-        tabIds: placement === "before"
-          ? [source.id, target.id]
-          : [target.id, source.id],
+        direction: layout?.direction === "column" ? "column" : "row",
+        tabIds: splitLayoutPaneIds(layout),
+        layout,
       };
       this.#state.splitGroups.push(group);
     }
+
+    this.#coLocateSplitGroup(group, target.id);
 
     this.#state.activeWorkspaceId = source.workspaceId;
     this.#state.activeTabId = source.id;
@@ -774,31 +1238,48 @@ export class BrowserController {
     return group.id;
   }
 
-  detachSplitTab(id, targetId = null, position = "before", moveToEnd = false) {
+  detachSplitTab(
+    id,
+    targetId = null,
+    position = "before",
+    moveToEnd = false,
+    folderId = undefined
+  ) {
     const tab = this.#tab(id);
     const group = tab ? this.#splitForTab(tab.id) : null;
-    if (!tab || !group) return false;
+    if (!tab || tab.essential || tab.pinned || !group) return false;
+    const shouldMove = Boolean(targetId) || moveToEnd || folderId !== undefined;
+    const destination = shouldMove
+      ? this.#resolveTabMoveDestination(tab, targetId, folderId)
+      : null;
+    if (shouldMove && !destination) return false;
 
-    const remainingIds = group.tabIds.filter(tabId => tabId !== tab.id);
-    group.tabIds = remainingIds;
+    const remainingLayout = removeSplitPane(
+      this.#normalizedGroupLayout(group),
+      tab.id
+    );
+    const remainingIds = splitLayoutPaneIds(remainingLayout);
     if (remainingIds.length < 2) {
       this.#state.splitGroups = this.#state.splitGroups.filter(
         item => item.id !== group.id
       );
+      this.#splitLayoutPreviews.delete(group.id);
       for (const remainingId of remainingIds) {
         const remainingView = this.#viewFor(remainingId);
         if (remainingView) this.#restoreDesktopLayout(remainingId, remainingView);
       }
-    } else if (group.direction === "grid" && remainingIds.length === 2) {
-      group.direction = "row";
+    } else {
+      this.#applyGroupLayout(group, remainingLayout);
     }
 
     const view = this.#viewFor(tab.id);
     if (view) this.#restoreDesktopLayout(tab.id, view);
-    if (targetId && targetId !== tab.id) {
-      this.#reorderTabState(tab.id, targetId, position);
-    } else if (moveToEnd) {
-      this.#reorderTabState(tab.id, null, "after");
+    if (destination) {
+      this.#applyResolvedTabMove(
+        tab,
+        destination,
+        targetId ? position : "after"
+      );
     }
 
     this.#state.activeWorkspaceId = tab.workspaceId;
@@ -813,6 +1294,7 @@ export class BrowserController {
     const group = this.#splitForTab(this.#state.activeTabId);
     if (!group) return false;
     this.#state.splitGroups = this.#state.splitGroups.filter(item => item.id !== group.id);
+    this.#splitLayoutPreviews.delete(group.id);
     for (const id of group.tabIds) {
       const view = this.#viewFor(id);
       if (view) this.#restoreDesktopLayout(id, view);
@@ -821,20 +1303,63 @@ export class BrowserController {
     return true;
   }
 
-  createFolder({ name = "Folder", tabIds = [this.#state.activeTabId] } = {}) {
-    const usableTabIds = [...new Set(tabIds)]
-      .filter(id => {
-        const tab = this.#tab(id);
-        return tab?.workspaceId === this.#state.activeWorkspaceId && !tab.essential;
-      });
-    if (!usableTabIds.length) return null;
+  createFolder(options = {}) {
+    if (
+      !options ||
+      typeof options !== "object" ||
+      Array.isArray(options) ||
+      this.#state.folders.length >= LIBRARY_CONTAINER_LIMIT
+    ) {
+      return null;
+    }
+    const requestedTabIds = Object.hasOwn(options, "tabIds")
+      ? options.tabIds
+      : [this.#state.activeTabId];
+    if (
+      !Array.isArray(requestedTabIds) ||
+      requestedTabIds.length > FOLDER_MEMBER_LIMIT
+    ) {
+      return null;
+    }
+    const usableTabIds = [];
+    const seen = new Set();
+    for (const requestedId of requestedTabIds) {
+      if (!validId(requestedId)) return null;
+      const requestedTab = this.#tab(requestedId);
+      if (
+        !requestedTab ||
+        requestedTab.workspaceId !== this.#state.activeWorkspaceId ||
+        requestedTab.essential ||
+        requestedTab.pinned
+      ) {
+        return null;
+      }
+      const group = this.#splitForTab(requestedTab.id);
+      const candidateIds = group ? group.tabIds : [requestedTab.id];
+      for (const candidateId of candidateIds) {
+        const candidate = this.#tab(candidateId);
+        if (
+          !candidate ||
+          candidate.workspaceId !== this.#state.activeWorkspaceId ||
+          candidate.essential ||
+          candidate.pinned
+        ) {
+          return null;
+        }
+        if (!seen.has(candidateId)) {
+          seen.add(candidateId);
+          usableTabIds.push(candidateId);
+        }
+      }
+    }
+    if (usableTabIds.length > FOLDER_MEMBER_LIMIT) return null;
     for (const folder of this.#state.folders) {
       folder.tabIds = folder.tabIds.filter(id => !usableTabIds.includes(id));
     }
     const folder = {
       id: randomUUID(),
       workspaceId: this.#state.activeWorkspaceId,
-      name: safeTitle(name, "Folder").slice(0, 80),
+      name: safeTitle(options.name, "Folder").slice(0, 80),
       tabIds: usableTabIds,
       expanded: true,
     };
@@ -849,6 +1374,26 @@ export class BrowserController {
     folder.expanded = !folder.expanded;
     this.#commit();
     return folder.expanded;
+  }
+
+  renameFolder(id, name) {
+    if (!validId(id) || typeof name !== "string") return false;
+    const folder = this.#state.folders.find(item => item.id === id);
+    const value = name.trim().slice(0, 80);
+    if (!folder || !value) return false;
+    if (folder.name === value) return true;
+    folder.name = value;
+    this.#commit();
+    return true;
+  }
+
+  deleteFolder(id) {
+    if (!validId(id)) return false;
+    const index = this.#state.folders.findIndex(item => item.id === id);
+    if (index < 0) return false;
+    this.#state.folders.splice(index, 1);
+    this.#commit();
+    return true;
   }
 
   toggleSidebar() {
@@ -869,6 +1414,40 @@ export class BrowserController {
     return true;
   }
 
+  setAppearance(payload = {}) {
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      return false;
+    }
+    const {
+      theme,
+      reduceTransparency,
+      workspaceId,
+      workspaceColor,
+    } = payload;
+    const workspace = this.#workspace(workspaceId);
+    const color = typeof workspaceColor === "string" &&
+      /^#[\da-f]{6}$/i.test(workspaceColor)
+      ? normalizeWorkspaceColor(workspaceColor, "")
+      : "";
+    if (
+      !APPEARANCE_THEME_SET.has(theme) ||
+      typeof reduceTransparency !== "boolean" ||
+      !validId(workspaceId) ||
+      workspaceId !== this.#state.activeWorkspaceId ||
+      !workspace ||
+      !color
+    ) {
+      return false;
+    }
+
+    const appearance = { theme, reduceTransparency };
+    this.#applyAppearance({ ...appearance });
+    this.#state.settings.appearance = appearance;
+    workspace.color = color;
+    this.#commit();
+    return true;
+  }
+
   openDevTools(id = this.#state.activeTabId) {
     const contents = this.#viewFor(id)?.webContents;
     if (!contents) return false;
@@ -880,16 +1459,44 @@ export class BrowserController {
     if (this.#destroyPromise) return this.#destroyPromise;
     this.#acceptCommands = false;
     this.#destroying = true;
+    this.#denyConfiguredSessionPermissions();
     this.#clearSidebarOverlayHideTimer();
     this.#stopSidebarOverlayPointerWatch();
+    this.#splitLayoutPreviews.clear();
     for (const id of this.#adaptiveViews.keys()) {
       this.#cancelAdaptiveProbe(id, true);
     }
     this.#destroyPromise = (async () => {
-      await this.#commandQueue;
-      await Promise.all([...this.#views.keys()].map(id => this.#destroyView(id)));
-      await this.#destroySidebarOverlay();
-      await this.#store.flush(this.#state);
+      let remoteViewsDestroyed = false;
+      try {
+        await this.#commandQueue;
+        if (this.#state.history.preferences.clearOnExit) {
+          this.#historyService.clear({ range: "all" });
+        }
+        const remoteContents = [...this.#views.values()].flatMap(view => {
+          try {
+            return [view.webContents];
+          } catch {
+            return [];
+          }
+        });
+        await Promise.all([...this.#views.keys()].map(id => this.#destroyView(id)));
+        remoteViewsDestroyed = remoteContents.every(contents => {
+          try {
+            return contents.isDestroyed();
+          } catch {
+            return true;
+          }
+        });
+        await this.#destroySidebarOverlay();
+        await this.#downloadService.flush();
+        await this.#store.flush(this.#state);
+      } finally {
+        this.#releaseConfiguredSessions({
+          preservePermissionDeny: !remoteViewsDestroyed,
+        });
+        this.#downloadService.dispose();
+      }
     })();
     return this.#destroyPromise;
   }
@@ -1201,6 +1808,9 @@ export class BrowserController {
     this.#window.contentView.addChildView(view);
     this.#views.set(tab.id, view);
     this.#navigationVersions.set(tab.id, 0);
+    this.#historyNavigationVersions.set(tab.id, 0);
+    this.#historyRecordByTab.delete(tab.id);
+    this.#historyNextTransitions.delete(tab.id);
     this.#configureSession(view.webContents.session);
     this.#desktopUserAgent ||= withoutElectronUserAgent(
       view.webContents.session.getUserAgent()
@@ -1244,6 +1854,7 @@ export class BrowserController {
       if (
         this.#destroying ||
         this.#views.get(tab.id) !== view ||
+        this.#tab(tab.id) !== tab ||
         this.#navigationVersions.get(tab.id) !== version ||
         contents.isDestroyed()
       ) {
@@ -1251,23 +1862,38 @@ export class BrowserController {
       }
       return contents.loadURL(url);
     }).catch(error => {
+      const becameDownload = error?.code === "ERR_FAILED" &&
+        this.#downloadService.snapshot().some(download => download.url === error?.url);
       if (
         error?.code !== "ERR_ABORTED" &&
+        !becameDownload &&
         this.#views.get(tab.id) === view &&
+        this.#tab(tab.id) === tab &&
         !this.#destroying
       ) {
-        console.warn(warning, error);
+        console.warn(`${warning} [${safeErrorCode(error)}]`);
       }
     });
   }
 
+  #isCurrentTabView(tab, view, contents) {
+    return Boolean(
+      !this.#destroying &&
+      this.#views.get(tab.id) === view &&
+      this.#tab(tab.id) === tab &&
+      contents &&
+      !contents.isDestroyed()
+    );
+  }
+
   #wireWebContents(tab, view) {
     const contents = view.webContents;
+    const isCurrentView = () => this.#isCurrentTabView(tab, view, contents);
 
     contents.on("focus", () => {
       if (
+        !isCurrentView() ||
         !view.getVisible() ||
-        !this.#tab(tab.id) ||
         this.#state.activeTabId === tab.id
       ) {
         return;
@@ -1279,31 +1905,67 @@ export class BrowserController {
     });
 
     contents.setWindowOpenHandler(details => {
+      if (!isCurrentView()) return { action: "deny" };
       if (isSafePageUrl(details.url)) {
-        void this.dispatch(commands.createTab, {
+        this.#runDetached(this.dispatch(commands.createTab, {
           url: details.url,
           workspaceId: tab.workspaceId,
           activate: true,
-        });
+        }), "Unable to open page-created tab");
       } else if (/^(mailto|tel):/i.test(details.url)) {
-        void this.#confirmExternalOpen(details.url);
+        this.#runDetached(
+          this.#confirmExternalOpen(details.url),
+          "Unable to open external application"
+        );
       }
       return { action: "deny" };
     });
 
     contents.on("will-navigate", (event, legacyUrl) => {
+      if (!isCurrentView()) {
+        event.preventDefault();
+        return;
+      }
       const targetUrl = event.url || legacyUrl;
       if (isSafePageUrl(targetUrl)) return;
-      if (/^(mailto|tel):/i.test(targetUrl)) void this.#confirmExternalOpen(targetUrl);
+      if (/^(mailto|tel):/i.test(targetUrl)) {
+        this.#runDetached(
+          this.#confirmExternalOpen(targetUrl),
+          "Unable to open external application"
+        );
+      }
       event.preventDefault();
     });
 
     contents.on("did-start-navigation", details => {
-      if (!details.isMainFrame || details.isSameDocument) return;
-      this.#handleAdaptiveNavigationStart(tab.id, view, details.url);
+      if (
+        !details.isMainFrame ||
+        !isCurrentView()
+      ) {
+        return;
+      }
+      this.#beginHistoryNavigation(tab, view, contents, details);
+      if (!details.isSameDocument) {
+        this.#handleAdaptiveNavigationStart(tab.id, view, details.url);
+      }
+    });
+
+    contents.on("did-redirect-navigation", details => {
+      if (
+        !details.isMainFrame ||
+        !isCurrentView()
+      ) {
+        return;
+      }
+      const record = this.#historyRecordByTab.get(tab.id);
+      if (record) {
+        record.redirected = true;
+        record.startedUrl = details.url;
+      }
     });
 
     contents.on("did-start-loading", () => {
+      if (!isCurrentView()) return;
       this.#cancelAdaptiveProbe(tab.id, true);
       tab.loading = true;
       tab.crashed = false;
@@ -1312,9 +1974,7 @@ export class BrowserController {
 
     contents.on("did-stop-loading", () => {
       if (
-        this.#destroying ||
-        this.#views.get(tab.id) !== view ||
-        contents.isDestroyed()
+        !isCurrentView()
       ) {
         return;
       }
@@ -1326,11 +1986,12 @@ export class BrowserController {
       } else if (pending) {
         this.#rollbackAdaptiveTransition(tab.id, view, { suppress: true });
       }
-      if (isSafePageUrl(currentUrl) && tab.url !== currentUrl) {
-        tab.url = currentUrl;
+      const normalizedUrl = normalizeCommittedPageUrl(currentUrl);
+      if (normalizedUrl && tab.url !== normalizedUrl) {
+        tab.url = normalizedUrl;
         tab.title = safeTitle(
           contents.getTitle(),
-          currentUrl.startsWith("chroma:") ? "New Tab" : currentUrl
+          normalizedUrl.startsWith("chroma:") ? "New Tab" : normalizedUrl
         );
         tab.crashed = false;
       }
@@ -1344,59 +2005,82 @@ export class BrowserController {
 
     const markFailedAdaptiveLoad = (
       _event,
-      _errorCode,
+      errorCode,
       _errorDescription,
-      _validatedUrl,
+      validatedUrl,
       isMainFrame
     ) => {
+      if (!isMainFrame || !isCurrentView()) return;
       const adaptive = this.#adaptiveViews.get(tab.id);
-      if (isMainFrame && this.#views.get(tab.id) === view && adaptive?.pending) {
+      if (adaptive?.pending) {
         adaptive.pending.failed = true;
+      }
+      const record = this.#historyRecordByTab.get(tab.id);
+      if (record && (!validatedUrl || record.startedUrl === validatedUrl)) {
+        record.failed = true;
+        record.aborted = errorCode === -3;
       }
     };
     contents.on("did-fail-load", markFailedAdaptiveLoad);
     contents.on("did-fail-provisional-load", markFailedAdaptiveLoad);
 
-    const handleNavigation = url => {
-      if (!isSafePageUrl(url)) return;
-      tab.url = url;
+    const handleNavigation = (url, sameDocument = false) => {
+      if (
+        !isCurrentView()
+      ) {
+        return;
+      }
+      const normalizedUrl = normalizeCommittedPageUrl(url);
+      if (!normalizedUrl) return;
+      tab.url = normalizedUrl;
       tab.crashed = false;
       this.#refreshNavigationState(tab, contents);
-      this.#recordHistory(tab);
+      this.#recordHistory(tab, view, contents, normalizedUrl, sameDocument);
       this.#commit();
     };
     contents.on("did-navigate", (_event, url) => {
+      if (!isCurrentView()) return;
       this.#markAdaptiveTransitionCommitted(tab.id, view);
       handleNavigation(url);
     });
     contents.on("did-navigate-in-page", (_event, url, isMainFrame) => {
-      if (isMainFrame) handleNavigation(url);
+      if (isMainFrame && isCurrentView()) handleNavigation(url, true);
     });
 
     contents.on("page-title-updated", (event, title) => {
       event.preventDefault();
+      if (!isCurrentView()) return;
       tab.title = safeTitle(title, tab.url.startsWith("chroma:") ? "New Tab" : tab.url);
-      this.#updateLatestHistoryTitle(tab);
+      this.#updateLatestHistoryTitle(tab, view, contents, title);
       this.#commit();
     });
 
     contents.on("page-favicon-updated", (_event, favicons) => {
-      const favicon = favicons.find(value => /^https?:|^data:image\//.test(value));
+      if (!isCurrentView()) return;
+      const favicon = Array.isArray(favicons)
+        ? favicons
+            .slice(0, 32)
+            .map(normalizeTabFavicon)
+            .find(Boolean)
+        : "";
       if (!favicon) return;
       tab.favicon = favicon;
       this.#commit();
     });
 
     contents.on("media-started-playing", () => {
+      if (!isCurrentView()) return;
       tab.audible = true;
       this.#notify(false);
     });
     contents.on("media-paused", () => {
+      if (!isCurrentView()) return;
       tab.audible = false;
       this.#notify(false);
     });
 
     contents.on("render-process-gone", (_event, details) => {
+      if (!isCurrentView()) return;
       tab.loading = false;
       tab.crashed = true;
       tab.title = details.reason === "killed" ? tab.title : "Tab crashed";
@@ -1404,28 +2088,52 @@ export class BrowserController {
     });
 
     contents.on("context-menu", (_event, params) => {
-      this.#showContextMenu(tab, contents, params);
+      if (!isCurrentView()) return;
+      this.#showContextMenu(tab, view, contents, params);
     });
 
     contents.on("before-input-event", (event, input) => {
-      if (input.type !== "keyDown" || input.isAutoRepeat) return;
+      if (!isCurrentView()) return;
+      if (
+        !["keyDown", "rawKeyDown"].includes(input.type) ||
+        input.isAutoRepeat
+      ) {
+        return;
+      }
       const modifier = activeModifier(input);
       const key = String(input.key || "").toLowerCase();
       if (modifier && key === "l") {
         event.preventDefault();
         this.focusAddress();
+      } else if (modifier && input.shift && !input.alt && key === "p") {
+        event.preventDefault();
+        this.openCommandPalette();
+      } else if (
+        modifier &&
+        !input.shift &&
+        !input.alt &&
+        key === (process.platform === "darwin" ? "y" : "h")
+      ) {
+        event.preventDefault();
+        this.openHistory();
       } else if (modifier && input.shift && key === "t") {
         event.preventDefault();
-        void this.dispatch(commands.reopenTab);
+        this.#runDetached(
+          this.dispatch(commands.reopenTab),
+          "Unable to reopen closed tab"
+        );
       } else if (modifier && key === "t") {
         event.preventDefault();
-        void this.dispatch(commands.createTab);
+        this.#runDetached(this.dispatch(commands.createTab), "Unable to create tab");
       } else if (modifier && key === "w") {
         event.preventDefault();
-        void this.dispatch(commands.closeTab, { id: tab.id });
+        this.#runDetached(
+          this.dispatch(commands.closeTab, { id: tab.id }),
+          "Unable to close tab"
+        );
       } else if (modifier && key === "r") {
         event.preventDefault();
-        contents.reload();
+        this.reload(tab.id);
       } else if (modifier && key === "[") {
         event.preventDefault();
         this.goBack(tab.id);
@@ -1438,7 +2146,6 @@ export class BrowserController {
 
   #configureSession(browserSession) {
     if (this.#configuredSessions.has(browserSession)) return;
-    this.#configuredSessions.add(browserSession);
     installInternalProtocol(browserSession.protocol);
     const permissionDecisions = new Map();
     browserSession.setUserAgent(
@@ -1447,19 +2154,67 @@ export class BrowserController {
 
     browserSession.setPermissionRequestHandler(
       (webContents, permission, callback, details) => {
-        if (!ALLOWED_PERMISSIONS.has(permission)) {
+        if (
+          this.#destroying ||
+          !this.#ownsPageWebContents(webContents) ||
+          !ALLOWED_PERMISSIONS.has(permission)
+        ) {
           callback(false);
           return;
         }
-        const origin = this.#webOrigin(details.requestingUrl || webContents.getURL());
+
+        let decisionKey;
+        let mediaTypes = null;
+        let mediaScope = null;
+        let permissionLabel = permission;
+        let origin = this.#webOrigin(
+          details?.requestingUrl || webContents.getURL()
+        );
+        if (permission === "media") {
+          mediaTypes = normalizedMediaTypes(details);
+          mediaScope = this.#mediaPermissionScope(webContents, details, origin);
+          if (!mediaTypes || !mediaScope) {
+            callback(false);
+            return;
+          }
+          origin = mediaScope.requestingOrigin;
+          decisionKey = this.#mediaCombinationDecisionKey(mediaScope, mediaTypes);
+          permissionLabel = mediaPermissionLabel(mediaTypes);
+        } else {
+          decisionKey = `${origin}|${permission}`;
+        }
         if (!origin) {
           callback(false);
           return;
         }
-        const decisionKey = `${origin}|${permission}`;
         if (permissionDecisions.has(decisionKey)) {
           callback(permissionDecisions.get(decisionKey));
           return;
+        }
+        if (
+          mediaScope &&
+          mediaTypes.length > 1 &&
+          mediaTypes.every(type =>
+            permissionDecisions.get(
+              this.#mediaTypeDecisionKey(mediaScope, type)
+            ) === true
+          )
+        ) {
+          permissionDecisions.set(decisionKey, true);
+          callback(true);
+          return;
+        }
+        if (mediaScope && mediaTypes.length === 1) {
+          const typeDecisionKey = this.#mediaTypeDecisionKey(
+            mediaScope,
+            mediaTypes[0]
+          );
+          if (permissionDecisions.has(typeDecisionKey)) {
+            const allowed = permissionDecisions.get(typeDecisionKey);
+            permissionDecisions.set(decisionKey, allowed);
+            callback(allowed);
+            return;
+          }
         }
         const host = new URL(origin).host;
         void dialog
@@ -1469,12 +2224,22 @@ export class BrowserController {
             defaultId: 1,
             cancelId: 1,
             title: "Site permission",
-            message: `${host} wants permission to use ${permission}.`,
+            message: `${host} wants permission to use ${permissionLabel}.`,
             detail: "This decision applies until the browser is closed.",
           })
           .then(result => {
-            const allowed = result.response === 0;
+            const allowed = !this.#destroying &&
+              this.#ownsPageWebContents(webContents) &&
+              result.response === 0;
             permissionDecisions.set(decisionKey, allowed);
+            if (allowed && mediaScope) {
+              for (const type of mediaTypes) {
+                permissionDecisions.set(
+                  this.#mediaTypeDecisionKey(mediaScope, type),
+                  true
+                );
+              }
+            }
             callback(allowed);
           })
           .catch(() => callback(false));
@@ -1482,9 +2247,27 @@ export class BrowserController {
     );
 
     browserSession.setPermissionCheckHandler(
-      (_webContents, permission, requestingOrigin) => {
-        if (!ALLOWED_PERMISSIONS.has(permission)) return false;
-        const origin = this.#webOrigin(requestingOrigin);
+      (webContents, permission, requestingOrigin, details) => {
+        if (
+          this.#destroying ||
+          !this.#ownsPageWebContents(webContents) ||
+          !ALLOWED_PERMISSIONS.has(permission)
+        ) {
+          return false;
+        }
+        const origin = this.#webOrigin(details?.requestingUrl || requestingOrigin);
+        if (permission === "media") {
+          const mediaType = details?.mediaType;
+          const mediaScope = MEDIA_PERMISSION_TYPES.has(mediaType)
+            ? this.#mediaPermissionScope(webContents, details, origin)
+            : null;
+          return Boolean(
+            mediaScope &&
+            permissionDecisions.get(
+              this.#mediaTypeDecisionKey(mediaScope, mediaType)
+            ) === true
+          );
+        }
         return origin
           ? permissionDecisions.get(`${origin}|${permission}`) === true
           : false;
@@ -1493,46 +2276,118 @@ export class BrowserController {
 
     browserSession.setDevicePermissionHandler(() => false);
 
-    browserSession.on("will-download", (_event, item) => {
-      const download = {
-        id: randomUUID(),
-        filename: item.getFilename(),
-        url: item.getURL(),
-        state: "progressing",
-        receivedBytes: 0,
-        totalBytes: item.getTotalBytes(),
-        startedAt: Date.now(),
-        savePath: "",
-      };
-      this.#state.downloads.unshift(download);
-      this.#state.downloads = this.#state.downloads.slice(0, 100);
-      this.#notify(false);
-      item.on("updated", (_itemEvent, state) => {
-        download.state = state;
-        download.receivedBytes = item.getReceivedBytes();
-        download.totalBytes = item.getTotalBytes();
-        this.#notify(false);
-      });
-      item.once("done", (_itemEvent, state) => {
-        download.state = state;
-        download.receivedBytes = item.getReceivedBytes();
-        download.totalBytes = item.getTotalBytes();
-        download.savePath = item.getSavePath();
-        this.#notify(false);
-      });
-    });
+    const willDownload = (_event, item) => {
+      try {
+        this.#downloadService.register(item);
+      } catch (error) {
+        if (!this.#destroying) console.warn("Unable to register download:", error);
+      }
+    };
+    browserSession.on("will-download", willDownload);
+    this.#configuredSessions.set(browserSession, { willDownload });
   }
 
-  #showContextMenu(tab, contents, params) {
+  #denyConfiguredSessionPermissions() {
+    for (const browserSession of this.#configuredSessions.keys()) {
+      try {
+        browserSession.setPermissionRequestHandler(denyPermissionRequest);
+        browserSession.setPermissionCheckHandler(denyPermissionCheck);
+        browserSession.setDevicePermissionHandler(denyDevicePermission);
+      } catch (error) {
+        console.warn(
+          `Unable to lock down browser permissions [${safeErrorCode(error)}]`
+        );
+      }
+    }
+  }
+
+  #releaseConfiguredSessions({ preservePermissionDeny = false } = {}) {
+    for (const [browserSession, handlers] of this.#configuredSessions) {
+      try {
+        browserSession.removeListener("will-download", handlers.willDownload);
+        if (preservePermissionDeny) {
+          browserSession.setPermissionRequestHandler(denyPermissionRequest);
+          browserSession.setPermissionCheckHandler(denyPermissionCheck);
+          browserSession.setDevicePermissionHandler(denyDevicePermission);
+        } else {
+          browserSession.setPermissionRequestHandler(null);
+          browserSession.setPermissionCheckHandler(null);
+          browserSession.setDevicePermissionHandler(null);
+        }
+      } catch (error) {
+        if (!this.#destroying) console.warn("Unable to release browser session:", error);
+      }
+    }
+    this.#configuredSessions.clear();
+  }
+
+  #ownsPageWebContents(candidate) {
+    if (!candidate) return false;
+    try {
+      if (candidate.isDestroyed()) return false;
+    } catch {
+      return false;
+    }
+    for (const view of this.#views.values()) {
+      try {
+        if (view.webContents === candidate) return true;
+      } catch {
+        // A view can be invalidated while the session is dispatching a check.
+      }
+    }
+    return false;
+  }
+
+  #mediaPermissionScope(webContents, details = {}, fallbackOrigin = "") {
+    const requestingOrigin = this.#webOrigin(
+      details.requestingUrl || fallbackOrigin || webContents?.getURL()
+    );
+    const securityOrigin = this.#webOrigin(details.securityOrigin) || requestingOrigin;
+    const isMainFrame = details.isMainFrame === true;
+    const embeddingOrigin = isMainFrame
+      ? requestingOrigin
+      : this.#webOrigin(details.embeddingOrigin) ||
+        this.#webOrigin(webContents?.getURL());
+    if (!requestingOrigin || !securityOrigin || !embeddingOrigin) return null;
+    return {
+      requestingOrigin,
+      securityOrigin,
+      embeddingOrigin,
+      isMainFrame,
+    };
+  }
+
+  #mediaDecisionScopeKey(scope) {
+    return JSON.stringify([
+      scope.requestingOrigin,
+      scope.securityOrigin,
+      scope.embeddingOrigin,
+      scope.isMainFrame,
+    ]);
+  }
+
+  #mediaTypeDecisionKey(scope, type) {
+    return `media:type:${type}:${this.#mediaDecisionScopeKey(scope)}`;
+  }
+
+  #mediaCombinationDecisionKey(scope, types) {
+    return `media:set:${types.join("+")}:${this.#mediaDecisionScopeKey(scope)}`;
+  }
+
+  #showContextMenu(tab, view, contents, params) {
+    if (!this.#isCurrentTabView(tab, view, contents)) return;
     const template = [];
     if (params.linkURL) {
       template.push(
         {
           label: "Open Link in New Tab",
-          click: () => void this.dispatch(commands.createTab, {
-            url: params.linkURL,
-            workspaceId: tab.workspaceId,
-          }),
+          click: () => {
+            if (!this.#isCurrentTabView(tab, view, contents)) return;
+            this.#runDetached(this.dispatch(commands.createTab, {
+              url: params.linkURL,
+              workspaceId: tab.workspaceId,
+            }), "Unable to open context-menu link");
+          },
         },
         { label: "Copy Link", click: () => clipboard.writeText(params.linkURL) },
         { type: "separator" }
@@ -1558,9 +2413,18 @@ export class BrowserController {
       { label: "Reload", click: () => this.reload(tab.id) },
       { type: "separator" },
       { label: tab.essential ? "Remove from Essentials" : "Add to Essentials", click: () => this.toggleEssential(tab.id) },
-      { label: "Inspect", click: () => contents.inspectElement(params.x, params.y) }
+      {
+        label: "Inspect",
+        click: () => {
+          if (this.#isCurrentTabView(tab, view, contents)) {
+            contents.inspectElement(params.x, params.y);
+          }
+        },
+      }
     );
-    Menu.buildFromTemplate(template).popup({ window: this.#window });
+    if (!this.#window.isDestroyed()) {
+      Menu.buildFromTemplate(template).popup({ window: this.#window });
+    }
   }
 
   async #confirmExternalOpen(url) {
@@ -1571,6 +2435,7 @@ export class BrowserController {
       return false;
     }
     if (!["mailto:", "tel:"].includes(parsed.protocol)) return false;
+    if (this.#destroying || this.#window.isDestroyed()) return false;
     const result = await dialog.showMessageBox(this.#window, {
       type: "question",
       buttons: ["Open", "Cancel"],
@@ -1594,21 +2459,136 @@ export class BrowserController {
     }
   }
 
-  #recordHistory(tab) {
-    if (!tab.url.startsWith("http")) return;
-    this.#state.history.push({
-      url: tab.url,
-      title: tab.title || tab.url,
-      visitedAt: Date.now(),
-    });
-    if (this.#state.history.length > MAX_HISTORY_ITEMS) {
-      this.#state.history.splice(0, this.#state.history.length - MAX_HISTORY_ITEMS);
+  #runHistoryRead(operation) {
+    try {
+      return operation();
+    } catch (error) {
+      if (
+        typeof error?.code === "string" &&
+        !String(error.message || "").includes(error.code)
+      ) {
+        error.message = `${error.code}: ${error.message}`;
+      }
+      throw error;
     }
   }
 
-  #updateLatestHistoryTitle(tab) {
-    const entry = [...this.#state.history].reverse().find(item => item.url === tab.url);
-    if (entry) entry.title = tab.title;
+  #commitHistoryMutation(operation) {
+    const revision = this.#state.history.revision;
+    const result = this.#runHistoryRead(operation);
+    if (this.#state.history.revision !== revision) this.#commit();
+    return result;
+  }
+
+  #beginHistoryNavigation(tab, view, contents, details) {
+    if (
+      this.#destroying ||
+      this.#views.get(tab.id) !== view ||
+      this.#tab(tab.id) !== tab ||
+      contents.isDestroyed()
+    ) {
+      return;
+    }
+
+    const version = (this.#historyNavigationVersions.get(tab.id) || 0) + 1;
+    this.#historyNavigationVersions.set(tab.id, version);
+    const requestedTransition = this.#historyNextTransitions.get(tab.id);
+    this.#historyNextTransitions.delete(tab.id);
+    const previousUrl = tab.url;
+    const inferredTransition =
+      details.isSameDocument !== true && details.url === previousUrl
+        ? "reload"
+        : details.initiator
+          ? "link"
+          : "other";
+    this.#historyRecordByTab.set(tab.id, {
+      version,
+      previousUrl,
+      startedUrl: details.url,
+      sameDocument: details.isSameDocument === true,
+      transition: requestedTransition || inferredTransition,
+      redirected: false,
+      failed: false,
+      aborted: false,
+      entryId: null,
+      committedUrl: null,
+    });
+  }
+
+  #recordHistory(tab, view, contents, url, sameDocument) {
+    if (
+      this.#destroying ||
+      this.#views.get(tab.id) !== view ||
+      this.#tab(tab.id) !== tab ||
+      contents.isDestroyed()
+    ) {
+      return;
+    }
+
+    let record = this.#historyRecordByTab.get(tab.id);
+    if (!record) {
+      const version = (this.#historyNavigationVersions.get(tab.id) || 0) + 1;
+      this.#historyNavigationVersions.set(tab.id, version);
+      record = {
+        version,
+        previousUrl: tab.url,
+        startedUrl: url,
+        sameDocument: sameDocument === true,
+        transition: "other",
+        redirected: false,
+        failed: false,
+        aborted: false,
+        entryId: null,
+        committedUrl: null,
+      };
+      this.#historyRecordByTab.set(tab.id, record);
+    }
+
+    try {
+      const result = this.#historyService.append({
+        tabId: tab.id,
+        navigationVersion: record.version,
+        url,
+        title: contents.getTitle(),
+        transition: record.redirected ? "redirect" : record.transition,
+        isMainFrame: true,
+        committed: true,
+        failed: record.failed,
+        aborted: record.aborted,
+        sameDocument: sameDocument === true || record.sameDocument,
+        previousUrl: record.previousUrl,
+      });
+      if (result.recorded) {
+        record.entryId = result.id;
+        record.committedUrl = result.entry.url;
+      }
+    } catch (error) {
+      if (!this.#destroying) console.warn("Unable to record browser history:", error);
+    }
+  }
+
+  #updateLatestHistoryTitle(tab, view, contents, title) {
+    if (
+      this.#destroying ||
+      this.#views.get(tab.id) !== view ||
+      this.#tab(tab.id) !== tab ||
+      contents.isDestroyed()
+    ) {
+      return;
+    }
+    const record = this.#historyRecordByTab.get(tab.id);
+    if (!record?.entryId) return;
+    try {
+      this.#historyService.updateTitle({
+        tabId: tab.id,
+        navigationVersion: record.version,
+        entryId: record.entryId,
+        url: contents.getURL() || record.committedUrl,
+        title,
+      });
+    } catch (error) {
+      if (!this.#destroying) console.warn("Unable to update browser history title:", error);
+    }
   }
 
   #refreshNavigationState(tab, contents) {
@@ -1630,14 +2610,24 @@ export class BrowserController {
       this.#syncSidebarOverlay();
       return;
     }
-    const visibleIds = this.#visibleTabIds();
-    const rects = this.#contentBounds
-      ? splitPaneRects(
-          this.#contentBounds,
-          visibleIds.length,
-          this.#splitForTab(this.#state.activeTabId)?.direction || "row"
-        ).viewRects
-      : [];
+    let visibleIds = this.#visibleTabIds();
+    let rects = [];
+    if (this.#contentBounds && visibleIds.length) {
+      const group = this.#splitForTab(this.#state.activeTabId);
+      if (group) {
+        const layout = this.#splitLayoutPreviews.get(group.id) ||
+          this.#normalizedGroupLayout(group);
+        const geometry = splitLayoutRects(this.#contentBounds, layout);
+        const visibleSet = new Set(visibleIds);
+        const visibleGeometry = geometry.paneIds
+          .map((id, index) => ({ id, rect: geometry.viewRects[index] }))
+          .filter(item => visibleSet.has(item.id) && item.rect);
+        visibleIds = visibleGeometry.map(item => item.id);
+        rects = visibleGeometry.map(item => item.rect);
+      } else {
+        rects = [{ ...this.#contentBounds }];
+      }
+    }
     for (const [id, view] of this.#views) {
       const index = visibleIds.indexOf(id);
       const visible = index >= 0 && Boolean(rects[index]);
@@ -2105,6 +3095,7 @@ export class BrowserController {
 
   #focusTab(id) {
     queueMicrotask(() => {
+      if (this.#destroying) return;
       const view = this.#viewFor(id);
       if (view?.getVisible() && !view.webContents.isDestroyed()) view.webContents.focus();
     });
@@ -2114,11 +3105,105 @@ export class BrowserController {
     for (const folder of this.#state.folders) {
       folder.tabIds = folder.tabIds.filter(tabId => tabId !== id);
     }
-    this.#state.folders = this.#state.folders.filter(folder => folder.tabIds.length);
+    const splitGroups = [];
     for (const group of this.#state.splitGroups) {
-      group.tabIds = group.tabIds.filter(tabId => tabId !== id);
+      if (!group.tabIds.includes(id)) {
+        splitGroups.push(group);
+        continue;
+      }
+      let layout = removeSplitPane(this.#normalizedGroupLayout(group), id);
+      let remainingIds = splitLayoutPaneIds(layout);
+      // A three-pane grid can collapse to a column when its full-height pane
+      // is removed. Two surviving panes use the canonical left/right layout,
+      // independent of which grid leaf was closed.
+      if (group.direction === "grid" && remainingIds.length === 2) {
+        layout = createSplitLayout(remainingIds, "row");
+        remainingIds = splitLayoutPaneIds(layout);
+      }
+      this.#splitLayoutPreviews.delete(group.id);
+      if (remainingIds.length < 2) {
+        for (const survivorId of remainingIds) {
+          const survivorView = this.#viewFor(survivorId);
+          if (survivorView) {
+            this.#restoreDesktopLayout(survivorId, survivorView);
+          }
+        }
+        continue;
+      }
+      this.#applyGroupLayout(group, layout);
+      splitGroups.push(group);
     }
-    this.#state.splitGroups = this.#state.splitGroups.filter(group => group.tabIds.length >= 2);
+    this.#state.splitGroups = splitGroups;
+  }
+
+  #insertPaneIntoGroup(
+    group,
+    targetPaneId,
+    newPaneId,
+    direction = "row",
+    placement = "after"
+  ) {
+    const layout = this.#normalizedGroupLayout(group);
+    const paneIds = splitLayoutPaneIds(layout);
+    if (
+      !paneIds.includes(targetPaneId) ||
+      paneIds.includes(newPaneId) ||
+      paneIds.length >= 4
+    ) {
+      return layout;
+    }
+    return insertSplitPane(
+      layout,
+      targetPaneId,
+      newPaneId,
+      direction,
+      placement
+    );
+  }
+
+  #normalizedGroupLayout(group) {
+    return sanitizeSplitLayout(group?.layout, group?.tabIds, {
+      direction: group?.direction === "column" ? "column" : "row",
+    });
+  }
+
+  #applyGroupLayout(group, layout) {
+    if (!group) return [];
+    this.#splitLayoutPreviews.delete(group.id);
+    const normalized = sanitizeSplitLayout(layout, splitLayoutPaneIds(layout), {
+      direction: group.direction === "column" ? "column" : "row",
+    });
+    const tabIds = splitLayoutPaneIds(normalized);
+    group.layout = normalized;
+    group.tabIds = tabIds;
+    group.direction = tabIds.length > 2
+      ? "grid"
+      : normalized?.direction === "column"
+        ? "column"
+        : "row";
+    return tabIds;
+  }
+
+  #coLocateSplitGroup(group, targetId) {
+    if (!group || !group.tabIds.includes(targetId)) return;
+    const groupIds = new Set(group.tabIds);
+    const targetFolder = this.#state.folders.find(folder =>
+      folder.workspaceId === group.workspaceId && folder.tabIds.includes(targetId)
+    );
+    const originalTargetIndex = targetFolder?.tabIds.indexOf(targetId) ?? -1;
+    const insertAt = targetFolder
+      ? targetFolder.tabIds
+          .slice(0, originalTargetIndex)
+          .filter(tabId => !groupIds.has(tabId)).length
+      : -1;
+
+    for (const folder of this.#state.folders) {
+      folder.tabIds = folder.tabIds.filter(tabId => !groupIds.has(tabId));
+    }
+    if (targetFolder) {
+      targetFolder.tabIds.splice(insertAt, 0, ...group.tabIds);
+      targetFolder.expanded = true;
+    }
   }
 
   async #destroyView(id) {
@@ -2129,6 +3214,9 @@ export class BrowserController {
     this.#views.delete(id);
     this.#viewReady.delete(id);
     this.#navigationVersions.delete(id);
+    this.#historyNavigationVersions.delete(id);
+    this.#historyRecordByTab.delete(id);
+    this.#historyNextTransitions.delete(id);
     try {
       const contents = view.webContents;
       view.setVisible(false);

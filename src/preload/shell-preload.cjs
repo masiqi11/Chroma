@@ -8,10 +8,13 @@ const channels = Object.freeze({
   sidebarOverlayChanged: "chroma:sidebar-overlay-changed",
   chromeModalChanged: "chroma:chrome-modal-changed",
   tabDragChanged: "chroma:tab-drag-changed",
+  splitRatioPreview: "chroma:split-ratio-preview",
   windowDragStart: "chroma:window-drag-start",
   windowDragMove: "chroma:window-drag-move",
   windowDragEnd: "chroma:window-drag-end",
   windowControl: "chroma:window-control",
+  openHistory: "chroma:open-history",
+  openCommandPalette: "chroma:open-command-palette",
   invoke: "chroma:invoke",
 });
 
@@ -27,7 +30,23 @@ const commandNames = new Set([
   "navigation:reload",
   "navigation:stop",
   "tab:toggle-mute",
+  "tab:toggle-pin",
   "tab:toggle-essential",
+  "bookmark:toggle",
+  "bookmark:remove",
+  "history:query",
+  "history:suggest",
+  "history:remove",
+  "history:clear",
+  "history:set-preferences",
+  "history:open",
+  "download:pause",
+  "download:resume",
+  "download:cancel",
+  "download:open",
+  "download:reveal",
+  "download:remove",
+  "download:clear-finished",
   "workspace:create",
   "workspace:select",
   "workspace:rename",
@@ -35,10 +54,14 @@ const commandNames = new Set([
   "split:tabs",
   "split:detach",
   "split:remove",
+  "split:set-ratio",
   "folder:create",
   "folder:toggle",
+  "folder:rename",
+  "folder:delete",
   "sidebar:toggle",
   "sidebar:set-width",
+  "settings:set-appearance",
   "developer:open-tools",
 ]);
 
@@ -58,6 +81,10 @@ contextBridge.exposeInMainWorld(
       }
       return ipcRenderer.invoke(channels.invoke, name, clonePayload(payload));
     },
+    requestOpenHistory: () =>
+      ipcRenderer.invoke(channels.invoke, "history:open", {}),
+    requestOpenCommandPalette: () =>
+      ipcRenderer.send(channels.openCommandPalette),
     setContentBounds: bounds => {
       const safeBounds = {
         x: Number(bounds?.x) || 0,
@@ -91,6 +118,24 @@ contextBridge.exposeInMainWorld(
     setTabDragActive: active => {
       ipcRenderer.send(channels.tabDragChanged, active === true);
     },
+    previewSplitRatio: options => {
+      const groupId = typeof options?.groupId === "string"
+        ? options.groupId.slice(0, 200)
+        : "";
+      const pathCandidate = Array.isArray(options?.path) ? options.path : null;
+      const path = pathCandidate &&
+        pathCandidate.length <= 8 &&
+        pathCandidate.every(part => part === "first" || part === "second")
+        ? [...pathCandidate]
+        : null;
+      const ratio = options?.ratio;
+      ipcRenderer.send(channels.splitRatioPreview, {
+        groupId,
+        ...(path ? { path } : {}),
+        ...(typeof ratio === "number" && Number.isFinite(ratio) ? { ratio } : {}),
+        cancel: options?.cancel === true,
+      });
+    },
     startWindowDrag: point => {
       ipcRenderer.send(channels.windowDragStart, {
         screenX: Number(point?.screenX) || 0,
@@ -121,6 +166,18 @@ contextBridge.exposeInMainWorld(
       const handler = () => listener();
       ipcRenderer.on("chroma:focus-address", handler);
       return () => ipcRenderer.removeListener("chroma:focus-address", handler);
+    },
+    onOpenHistory: listener => {
+      if (typeof listener !== "function") return () => {};
+      const handler = () => listener();
+      ipcRenderer.on(channels.openHistory, handler);
+      return () => ipcRenderer.removeListener(channels.openHistory, handler);
+    },
+    onOpenCommandPalette: listener => {
+      if (typeof listener !== "function") return () => {};
+      const handler = () => listener();
+      ipcRenderer.on(channels.openCommandPalette, handler);
+      return () => ipcRenderer.removeListener(channels.openCommandPalette, handler);
     },
   })
 );

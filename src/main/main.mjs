@@ -9,7 +9,10 @@ import {
   registerInternalScheme,
 } from "./internal-pages.mjs";
 import { StateStore } from "./state-store.mjs";
+import { installProcessOutputGuards } from "./process-output.mjs";
 import { channels, commandNames, commands } from "../shared/channels.mjs";
+
+installProcessOutputGuards();
 
 const directory = path.dirname(fileURLToPath(import.meta.url));
 const shellDocumentUrl = pathToFileURL(
@@ -20,27 +23,102 @@ const controllers = new Map();
 const cleanupPromises = new WeakMap();
 const pendingCleanups = new Set();
 const windowDragSessions = new Map();
+const pendingPageUrls = [];
+let pendingPageUrlDrain = Promise.resolve();
+let creationPromise = null;
+let nextPendingPageUrlId = 0;
+let injectWindowCreationFailure =
+  process.env.CHROMA_HEADLESS_SMOKE === "1" &&
+  process.env.CHROMA_FAIL_WINDOW_CREATION_ONCE === "1";
 let quitting = false;
 
-function pageUrlFromArguments(argumentsList) {
+const DARK_WINDOW_BACKGROUND = "#17141d";
+const LIGHT_WINDOW_BACKGROUND = "#ece9ef";
+
+function currentWindowBackground() {
+  return nativeTheme.shouldUseDarkColors
+    ? DARK_WINDOW_BACKGROUND
+    : LIGHT_WINDOW_BACKGROUND;
+}
+
+function refreshWindowBackgrounds() {
+  const background = currentWindowBackground();
+  for (const window of BrowserWindow.getAllWindows()) {
+    if (!window.isDestroyed()) window.setBackgroundColor(background);
+  }
+}
+
+function applyWindowAppearance(window, appearance) {
+  const theme = ["system", "light", "dark"].includes(appearance?.theme)
+    ? appearance.theme
+    : "system";
+  nativeTheme.themeSource = theme;
+  if (!window.isDestroyed()) window.setBackgroundColor(currentWindowBackground());
+}
+
+nativeTheme.on("updated", refreshWindowBackgrounds);
+
+function runDetached(operation, context) {
+  if (!operation || typeof operation.then !== "function") return;
+  void operation.catch(error => {
+    if (
+      quitting ||
+      error?.code === "ERR_ABORTED" ||
+      String(error?.message || "").includes("Browser window is closing")
+    ) {
+      return;
+    }
+    console.warn(`${context}:`, error);
+  });
+}
+
+function pageUrlsFromArguments(argumentsList) {
+  const urls = [];
   for (const argument of argumentsList) {
     if (typeof argument !== "string") continue;
     try {
       const url = new URL(argument);
-      if (url.protocol === "http:" || url.protocol === "https:") return url.href;
+      if (url.protocol === "http:" || url.protocol === "https:") {
+        urls.push(url.href);
+      }
     } catch {
       // Non-URL command-line arguments belong to Electron/Chromium.
     }
   }
-  return null;
+  return urls;
 }
 
-let pendingPageUrl = pageUrlFromArguments(process.argv);
+function enqueuePageUrls(urls) {
+  for (const url of urls) {
+    pendingPageUrls.push({ id: ++nextPendingPageUrlId, url });
+  }
+}
 
-function consumePendingPageUrl() {
-  const url = pendingPageUrl;
-  pendingPageUrl = null;
-  return url;
+enqueuePageUrls(pageUrlsFromArguments(process.argv));
+
+function isPristineStartupState(state) {
+  const workspace = state.workspaces?.[0];
+  const tab = state.tabs?.[0];
+  return (
+    state.workspaces?.length === 1 &&
+    state.tabs?.length === 1 &&
+    state.activeWorkspaceId === workspace?.id &&
+    state.activeTabId === tab?.id &&
+    workspace?.name === "Personal" &&
+    workspace?.icon === "sparkles" &&
+    workspace?.color === "#e4a8ff" &&
+    tab?.workspaceId === workspace?.id &&
+    tab?.url === "chroma://newtab/" &&
+    !tab.essential &&
+    !tab.pinned &&
+    !state.folders?.length &&
+    !state.splitGroups?.length &&
+    !state.bookmarks?.length &&
+    !state.history?.entries?.length &&
+    state.settings?.sidebarWidth === 228 &&
+    state.settings?.sidebarCollapsed === false &&
+    state.settings?.compactMode === false
+  );
 }
 
 function trackControllerCleanup(controller) {
@@ -53,13 +131,78 @@ function trackControllerCleanup(controller) {
 }
 
 async function waitForPendingCleanups() {
-  if (!pendingCleanups.size) return;
-  const results = await Promise.allSettled([...pendingCleanups]);
-  for (const result of results) {
-    if (result.status === "rejected") {
-      console.warn("Unable to clean up a browser window:", result.reason);
+  while (pendingCleanups.size) {
+    const results = await Promise.allSettled([...pendingCleanups]);
+    for (const result of results) {
+      if (result.status === "rejected") {
+        console.warn("Unable to clean up a browser window:", result.reason);
+      }
     }
   }
+}
+
+function forgetControllerMappings(contentsIds) {
+  for (const contentsId of contentsIds) {
+    controllers.delete(contentsId);
+    windowDragSessions.delete(contentsId);
+  }
+  contentsIds.clear();
+}
+
+function readyBrowserWindow() {
+  return BrowserWindow.getAllWindows().find(window =>
+    !window.isDestroyed() && controllers.has(window.webContents.id)
+  ) || null;
+}
+
+function focusBrowserWindow(window) {
+  if (!window || window.isDestroyed()) return;
+  if (window.isMinimized()) window.restore();
+  window.show();
+  window.focus();
+}
+
+function removePendingPageUrl(entry) {
+  if (pendingPageUrls[0]?.id !== entry.id) {
+    throw new Error("Pending page URL delivery order changed");
+  }
+  pendingPageUrls.shift();
+}
+
+function drainPendingPageUrls(window) {
+  const operation = pendingPageUrlDrain.then(async () => {
+    if (!window || window.isDestroyed()) return 0;
+    const controller = controllers.get(window.webContents.id);
+    if (!controller) return 0;
+
+    let delivered = 0;
+    while (pendingPageUrls.length && !window.isDestroyed()) {
+      const entry = pendingPageUrls[0];
+      await controller.dispatch(commands.createTab, { url: entry.url });
+      removePendingPageUrl(entry);
+      delivered += 1;
+    }
+    return delivered;
+  });
+  pendingPageUrlDrain = operation.catch(() => {});
+  return operation;
+}
+
+async function delayWindowCreationForSmoke() {
+  if (process.env.CHROMA_HEADLESS_SMOKE !== "1") return;
+  const requestedDelay = Number(process.env.CHROMA_WINDOW_CREATION_DELAY_MS);
+  if (!Number.isFinite(requestedDelay) || requestedDelay <= 0) return;
+  const delay = Math.min(5_000, Math.round(requestedDelay));
+  console.info(`Chroma smoke: window creation delayed ${delay}ms`);
+  await new Promise(resolve => {
+    setTimeout(resolve, delay);
+  });
+}
+
+function failWindowCreationOnceForSmoke() {
+  if (!injectWindowCreationFailure) return;
+  injectWindowCreationFailure = false;
+  throw new Error("Injected window creation failure");
 }
 
 registerInternalScheme();
@@ -133,6 +276,9 @@ ipcMain.on(channels.tabDragChanged, (event, active) => {
     isSidebarOverlayEvent(event)
   );
 });
+ipcMain.on(channels.splitRatioPreview, (event, options) => {
+  controllerForEvent(event)?.previewSplitRatio(options);
+});
 ipcMain.on(channels.windowDragStart, (event, point) => {
   if (!controllerForEvent(event)) return;
   const window = BrowserWindow.fromWebContents(event.sender);
@@ -177,6 +323,9 @@ ipcMain.on(channels.windowDragEnd, event => {
 ipcMain.on(channels.windowControl, (event, action) => {
   controllerForEvent(event)?.windowControl(action);
 });
+ipcMain.on(channels.openCommandPalette, event => {
+  controllerForEvent(event)?.openCommandPalette();
+});
 
 function installApplicationMenu() {
   const template = [
@@ -204,12 +353,18 @@ function installApplicationMenu() {
         {
           label: "New Tab",
           accelerator: "CmdOrCtrl+T",
-          click: (_item, window) => void controllers.get(window?.webContents.id)?.dispatch(commands.createTab),
+          click: (_item, window) => runDetached(
+            controllers.get(window?.webContents.id)?.dispatch(commands.createTab),
+            "Unable to create tab from application menu"
+          ),
         },
         {
           label: "Reopen Closed Tab",
           accelerator: "CmdOrCtrl+Shift+T",
-          click: (_item, window) => void controllers.get(window?.webContents.id)?.dispatch(commands.reopenTab),
+          click: (_item, window) => runDetached(
+            controllers.get(window?.webContents.id)?.dispatch(commands.reopenTab),
+            "Unable to reopen tab from application menu"
+          ),
         },
         { type: "separator" },
         { role: process.platform === "darwin" ? "close" : "quit" },
@@ -224,12 +379,18 @@ function installApplicationMenu() {
         {
           label: "Toggle Sidebar",
           accelerator: "CmdOrCtrl+Shift+S",
-          click: (_item, window) => void controllers.get(window?.webContents.id)?.dispatch(commands.toggleSidebar),
+          click: (_item, window) => runDetached(
+            controllers.get(window?.webContents.id)?.dispatch(commands.toggleSidebar),
+            "Unable to toggle sidebar from application menu"
+          ),
         },
         {
           label: "Developer Tools",
           accelerator: process.platform === "darwin" ? "Alt+Command+I" : "Ctrl+Shift+I",
-          click: (_item, window) => void controllers.get(window?.webContents.id)?.dispatch(commands.openDevTools),
+          click: (_item, window) => runDetached(
+            controllers.get(window?.webContents.id)?.dispatch(commands.openDevTools),
+            "Unable to open developer tools from application menu"
+          ),
         },
       ],
     },
@@ -238,8 +399,9 @@ function installApplicationMenu() {
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
-async function createBrowserWindow(startupPageUrl = consumePendingPageUrl()) {
+async function createBrowserWindowOnce() {
   await waitForPendingCleanups();
+  if (quitting) return null;
   const platformOptions =
     process.platform === "darwin"
       ? {
@@ -262,7 +424,7 @@ async function createBrowserWindow(startupPageUrl = consumePendingPageUrl()) {
     minWidth: 760,
     minHeight: 520,
     show: false,
-    backgroundColor: "#17141d",
+    backgroundColor: DARK_WINDOW_BACKGROUND,
     autoHideMenuBar: true,
     ...platformOptions,
     webPreferences: {
@@ -274,80 +436,128 @@ async function createBrowserWindow(startupPageUrl = consumePendingPageUrl()) {
       spellcheck: false,
     },
   });
-  if (process.platform === "darwin") {
-    window.setWindowButtonVisibility(false);
-  }
-
-  const store = new StateStore(path.join(app.getPath("userData"), "browser-state.json"));
-  const state = await store.load();
-  if (quitting || window.isDestroyed()) {
-    if (!window.isDestroyed()) window.destroy();
-    return null;
-  }
-  if (startupPageUrl) {
-    const startupTab = state.tabs.find(tab => tab.id === state.activeTabId);
-    if (startupTab) {
-      startupTab.url = startupPageUrl;
-      startupTab.title = "Loading…";
-      startupTab.loading = true;
-    }
-  }
   const shellWebContentsIds = new Set();
-  let controller;
-  controller = new BrowserController(window, state, store, {
-    registerShellWebContents(contents) {
-      shellWebContentsIds.add(contents.id);
-      controllers.set(contents.id, controller);
-    },
-    unregisterShellWebContents(contentsId) {
-      shellWebContentsIds.delete(contentsId);
-      controllers.delete(contentsId);
-      windowDragSessions.delete(contentsId);
-    },
-  });
-  // Cache this while the BrowserWindow is alive. Electron invalidates the
-  // webContents accessor before emitting `closed`.
-  const windowWebContentsId = window.webContents.id;
-  shellWebContentsIds.add(windowWebContentsId);
-  controllers.set(windowWebContentsId, controller);
+  let controller = null;
+  let completed = false;
 
-  window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
-  window.webContents.on("will-navigate", event => event.preventDefault());
-  window.webContents.on("preload-error", (_event, preloadPath, error) => {
-    console.error(`Shell preload failed (${preloadPath}):`, error);
-  });
-  window.webContents.on("console-message", event => {
-    if (event?.level === "error") console.error("Shell renderer:", event.message);
-  });
-  window.webContents.on("did-finish-load", () => {
-    window.webContents.send("chroma:state-changed", controller.getPublicState());
-  });
-
-  window.on("closed", () => {
-    for (const contentsId of shellWebContentsIds) {
-      controllers.delete(contentsId);
-      windowDragSessions.delete(contentsId);
+  try {
+    if (process.platform === "darwin") {
+      window.setWindowButtonVisibility(false);
     }
-    shellWebContentsIds.clear();
-    void trackControllerCleanup(controller).catch(error => {
-      console.warn("Unable to clean up closed browser window:", error);
-    });
-  });
+    await delayWindowCreationForSmoke();
 
-  await controller.initialize();
-  if (quitting || window.isDestroyed()) return null;
-  await window.loadFile(path.join(directory, "../renderer/index.html"));
-  if (process.env.CHROMA_HEADLESS_SMOKE === "1") {
-    // Keep a real compositor surface for viewport/resize tests without flashing
-    // the smoke-test window on the user's desktop. Transparent windows can be
-    // treated as occluded and lose Chromium compositor surfaces on macOS, so
-    // keep the test window opaque and place it well outside the visible screen.
-    window.setSkipTaskbar(true);
-    window.setPosition(-10_000, -10_000, false);
-    window.showInactive();
-  } else {
-    window.show();
+    const store = new StateStore(path.join(app.getPath("userData"), "browser-state.json"));
+    const state = await store.load();
+    if (quitting || window.isDestroyed()) return null;
+    const reusablePageUrl = isPristineStartupState(state)
+      ? pendingPageUrls[0] || null
+      : null;
+
+    controller = new BrowserController(window, state, store, {
+      registerShellWebContents(contents) {
+        shellWebContentsIds.add(contents.id);
+        controllers.set(contents.id, controller);
+      },
+      unregisterShellWebContents(contentsId) {
+        shellWebContentsIds.delete(contentsId);
+        controllers.delete(contentsId);
+        windowDragSessions.delete(contentsId);
+      },
+      applyAppearance(appearance) {
+        applyWindowAppearance(window, appearance);
+      },
+    });
+    // Cache this while the BrowserWindow is alive. Electron invalidates the
+    // webContents accessor before emitting `closed`.
+    const windowWebContentsId = window.webContents.id;
+    shellWebContentsIds.add(windowWebContentsId);
+    controllers.set(windowWebContentsId, controller);
+
+    window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+    window.webContents.on("will-navigate", event => event.preventDefault());
+    window.webContents.on("preload-error", (_event, preloadPath, error) => {
+      console.error(`Shell preload failed (${preloadPath}):`, error);
+    });
+    window.webContents.on("console-message", event => {
+      if (event?.level === "error") console.error("Shell renderer:", event.message);
+    });
+    window.webContents.on("did-finish-load", () => {
+      if (!window.isDestroyed()) {
+        window.webContents.send("chroma:state-changed", controller.getPublicState());
+      }
+    });
+
+    window.on("closed", () => {
+      forgetControllerMappings(shellWebContentsIds);
+      void trackControllerCleanup(controller).catch(error => {
+        console.warn("Unable to clean up closed browser window:", error);
+      });
+    });
+
+    await controller.initialize();
+    if (quitting || window.isDestroyed()) return null;
+    failWindowCreationOnceForSmoke();
+
+    if (reusablePageUrl && pendingPageUrls[0]?.id === reusablePageUrl.id) {
+      const navigated = await controller.dispatch(commands.navigate, {
+        id: state.activeTabId,
+        input: reusablePageUrl.url,
+      });
+      if (!navigated) throw new Error("Unable to open the startup page");
+      removePendingPageUrl(reusablePageUrl);
+    }
+    await drainPendingPageUrls(window);
+    if (quitting || window.isDestroyed()) return null;
+
+    await window.loadFile(path.join(directory, "../renderer/index.html"));
+    if (quitting || window.isDestroyed()) return null;
+    if (process.env.CHROMA_HEADLESS_SMOKE === "1") {
+      // Keep a real compositor surface for viewport/resize tests without flashing
+      // the smoke-test window on the user's desktop. Transparent windows can be
+      // treated as occluded and lose Chromium compositor surfaces on macOS, so
+      // keep the test window opaque and place it well outside the visible screen.
+      window.setSkipTaskbar(true);
+      window.setPosition(-10_000, -10_000, false);
+      window.showInactive();
+    } else {
+      window.show();
+    }
+    completed = true;
+    return window;
+  } finally {
+    if (!completed) {
+      forgetControllerMappings(shellWebContentsIds);
+      if (controller) {
+        await trackControllerCleanup(controller).catch(error => {
+          console.warn("Unable to clean up failed browser window:", error);
+        });
+      }
+      if (!window.isDestroyed()) window.destroy();
+    }
   }
+}
+
+async function createBrowserWindow({ focus = false } = {}) {
+  if (quitting) return null;
+
+  let window;
+  if (creationPromise) {
+    window = await creationPromise;
+  } else {
+    window = readyBrowserWindow();
+    if (!window) {
+      const attempt = createBrowserWindowOnce();
+      const trackedAttempt = attempt.finally(() => {
+        if (creationPromise === trackedAttempt) creationPromise = null;
+      });
+      creationPromise = trackedAttempt;
+      window = await trackedAttempt;
+    }
+  }
+
+  if (!window || window.isDestroyed()) return null;
+  await drainPendingPageUrls(window);
+  if (focus) focusBrowserWindow(window);
   return window;
 }
 
@@ -364,51 +574,27 @@ if (hasSingleInstanceLock) {
     });
 
   app.on("second-instance", (_event, commandLine) => {
-    const requestedUrl = pageUrlFromArguments(commandLine);
-    const window = BrowserWindow.getAllWindows()[0];
-    if (!window) {
-      void createBrowserWindow(requestedUrl).catch(error => {
-        if (!quitting) console.error("Unable to open browser window:", error);
-      });
-      return;
-    }
-    if (requestedUrl && !window.isDestroyed()) {
-      void controllers
-        .get(window.webContents.id)
-        ?.dispatch(commands.createTab, { url: requestedUrl });
-    }
-    if (window.isMinimized()) window.restore();
-    window.show();
-    window.focus();
+    enqueuePageUrls(pageUrlsFromArguments(commandLine));
+    void createBrowserWindow({ focus: true }).catch(error => {
+      if (!quitting) console.error("Unable to open browser window:", error);
+    });
   });
 
   app.on("activate", () => {
-    if (!BrowserWindow.getAllWindows().length) {
-      void createBrowserWindow().catch(error => {
-        if (!quitting) console.error("Unable to reactivate browser window:", error);
-      });
-    }
+    void createBrowserWindow({ focus: true }).catch(error => {
+      if (!quitting) console.error("Unable to reactivate browser window:", error);
+    });
   });
 
   app.on("open-url", (event, url) => {
     event.preventDefault();
-    const requestedUrl = pageUrlFromArguments([url]);
-    if (!requestedUrl) return;
-    const window = BrowserWindow.getAllWindows()[0];
-    if (!app.isReady() || !window) {
-      pendingPageUrl = requestedUrl;
-      if (app.isReady()) {
-        void createBrowserWindow().catch(error => {
-          if (!quitting) console.error("Unable to open URL in browser window:", error);
-        });
-      }
-      return;
-    }
-    void controllers
-      .get(window.webContents.id)
-      ?.dispatch(commands.createTab, { url: requestedUrl });
-    window.show();
-    window.focus();
+    const requestedUrls = pageUrlsFromArguments([url]);
+    if (!requestedUrls.length) return;
+    enqueuePageUrls(requestedUrls);
+    if (!app.isReady()) return;
+    void createBrowserWindow({ focus: true }).catch(error => {
+      if (!quitting) console.error("Unable to open URL in browser window:", error);
+    });
   });
 
   app.on("before-quit", event => {
@@ -421,6 +607,12 @@ if (hasSingleInstanceLock) {
   });
 
   app.on("window-all-closed", () => {
-    if (process.platform !== "darwin") app.quit();
+    if (
+      process.platform !== "darwin" &&
+      !creationPromise &&
+      !pendingPageUrls.length
+    ) {
+      app.quit();
+    }
   });
 }

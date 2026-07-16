@@ -43,18 +43,21 @@ receives Electron or Node.js objects. Web pages run in separate sandboxed
 
 ## Current module boundaries
 
-- `src/shared/`: navigation normalization, versioned state schema, split layout,
-  and command names. These modules are host-neutral.
+- `src/shared/`: navigation normalization, schema-6 state and topology repair,
+  split ratio trees, Appearance sanitization, command names, and command
+  search. These modules are host-neutral.
 - `src/renderer/`: Chroma interface. It calls only
   `window.chromaBrowser` and does not import Electron.
 - `src/preload/`: allow-listed IPC adapter. It validates command names and
   copies payloads across the context-isolated boundary.
 - `src/main/browser-controller.mjs`: Electron adapter for tabs, workspaces,
-  folders, split groups, navigation, permissions, downloads, responsive pane
-  handling, and view lifecycle.
+  folders, split groups, navigation, permissions, history/download services,
+  Appearance, responsive pane handling, and view lifecycle.
 - `src/main/state-store.mjs`: atomic, schema-versioned development-session
   persistence.
-- `scripts/runtime-smoke.mjs`: end-to-end host conformance test.
+- `scripts/runtime-smoke.mjs`: end-to-end host conformance test. The lifecycle,
+  session, visual, and package smoke scripts cover separate boundaries; see
+  [`../TESTING.md`](../TESTING.md).
 
 ## Current-to-future Chromium mapping
 
@@ -62,7 +65,7 @@ receives Electron or Node.js objects. Web pages run in separate sandboxed
 |---|---|---|
 | tab ID and lifecycle | `WebContentsView` map | `TabStripModel` plus stable Chroma metadata |
 | page | Electron `webContents` | Chromium `content::WebContents` |
-| split pane | native bounds from `layoutRects` | multiple BrowserViews/WebContents in a Chroma window view |
+| split pane | native bounds from the persisted ratio tree | multiple BrowserViews/WebContents in a Chroma window view |
 | shell bridge | context-isolated IPC preload | Mojo interface plus WebUI `PageHandler` |
 | profile | Electron persistent `session` | Chromium `Profile` / `BrowserContext` |
 | container | not implemented | `StoragePartitionConfig` with shared profile services |
@@ -120,3 +123,14 @@ session parser.
 Public distribution also requires a full third-party license and trademark
 review. Apache-2.0 covers Chroma's original source; it does not grant rights to
 Arc, Zen, Chromium, Electron, or operating-system trademarks and assets.
+The current dependency snapshot and release-notice work are recorded in
+[`../THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md).
+
+## Related evidence and status
+
+- [`../README.md`](../README.md): runnable milestone and setup
+- [`../DESIGN.md`](../DESIGN.md): current host design decisions
+- [`PARITY.md`](PARITY.md): implemented capabilities and remaining work
+- [`../TESTING.md`](../TESTING.md): automated gates and blocked manual GUI acceptance
+- [`../UI_COMPARISON.md`](../UI_COMPARISON.md): self-regression visual evidence
+- [`HISTORY-SPEC.md`](HISTORY-SPEC.md): history-service boundary

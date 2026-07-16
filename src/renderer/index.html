@@ -42,6 +42,7 @@
           <span id="site-indicator" class="site-indicator" aria-hidden="true"></span>
           <input id="address-input" type="text" inputmode="url" autocomplete="off" spellcheck="false" aria-label="Address and search" placeholder="Search or enter address" />
           <span id="loading-indicator" class="loading-indicator" aria-hidden="true"></span>
+          <button id="bookmark-toggle" class="address-action" type="button" data-action="toggle-bookmark" title="Bookmark this page" aria-label="Bookmark this page" aria-pressed="false"></button>
         </form>
 
         <div id="address-results" class="address-results" hidden></div>
@@ -58,6 +59,15 @@
           <div id="essentials-grid" class="essentials-grid"></div>
         </section>
 
+        <section id="pinned-section" class="pinned-section" aria-label="Pinned tabs" hidden>
+          <div id="pinned-grid" class="pinned-grid" role="tablist" aria-label="Pinned tabs"></div>
+        </section>
+
+        <section id="bookmarks-section" class="bookmarks-section" aria-label="Bookmarks">
+          <button id="bookmarks-toggle" class="bookmarks-header" type="button" data-action="toggle-bookmarks" aria-controls="bookmarks-list" aria-expanded="true"></button>
+          <div id="bookmarks-list" class="bookmarks-list"></div>
+        </section>
+
         <div class="tab-list-toolbar">
           <button class="new-tab-button" data-action="new-tab">
             <span class="button-icon" data-icon-slot="plus"></span>
@@ -72,6 +82,8 @@
 
         <footer class="sidebar-footer">
           <div id="workspace-switcher" class="workspace-switcher" aria-label="Spaces"></div>
+          <button id="appearance-button" class="icon-button footer-action" type="button" data-action="appearance" title="Appearance" aria-label="Open appearance settings" aria-haspopup="dialog" aria-controls="appearance-popover" aria-expanded="false"></button>
+          <button class="icon-button footer-action" data-action="open-history" title="History" aria-label="Open history"></button>
           <button class="icon-button footer-action" data-action="new-workspace" title="New space" aria-label="New space"></button>
         </footer>
 
@@ -85,13 +97,71 @@
           </div>
         </div>
         <div id="content-viewport" class="content-viewport">
-          <div id="pane-frame-layer" class="pane-frame-layer" aria-hidden="true"></div>
+          <div id="pane-frame-layer" class="pane-frame-layer"></div>
         </div>
         <div id="empty-state" class="empty-state" hidden>
           <div class="empty-logo">C</div>
           <p>Select a tab to begin</p>
         </div>
       </main>
+
+      <section id="command-palette" class="command-palette" role="dialog" aria-modal="true" aria-labelledby="command-palette-title" hidden>
+        <button class="command-palette-scrim" type="button" data-action="close-command-palette" aria-label="Close command palette"></button>
+        <div class="command-palette-surface">
+          <h1 id="command-palette-title" class="sr-only">Command palette</h1>
+          <div class="command-palette-search">
+            <span class="command-palette-search-icon" aria-hidden="true"></span>
+            <input id="command-palette-input" type="search" autocomplete="off" spellcheck="false" maxlength="120" aria-label="Search browser commands" aria-controls="command-palette-results" aria-autocomplete="list" placeholder="Type a command or action" />
+            <kbd>esc</kbd>
+          </div>
+          <div id="command-palette-results" class="command-palette-results" role="listbox" aria-label="Browser commands"></div>
+          <footer class="command-palette-footer">
+            <span><kbd>↑</kbd><kbd>↓</kbd> navigate</span>
+            <span><kbd>↵</kbd> run</span>
+            <span id="command-palette-count" role="status" aria-live="polite"></span>
+          </footer>
+        </div>
+      </section>
+
+      <section id="history-panel" class="history-panel" role="dialog" aria-modal="true" aria-labelledby="history-title" hidden>
+        <button class="history-panel-scrim" type="button" data-action="close-history" aria-label="Close history"></button>
+        <div class="history-surface">
+          <header class="history-header">
+            <div class="history-heading">
+              <span class="history-heading-icon" aria-hidden="true"></span>
+              <div>
+                <h1 id="history-title">History</h1>
+                <p id="history-recording-status" class="history-recording-status"></p>
+              </div>
+            </div>
+            <div class="history-header-actions">
+              <button id="history-clear-button" class="history-button secondary" type="button" data-action="open-history-clear">Clear…</button>
+              <button class="icon-button history-close" type="button" data-action="close-history" title="Close history" aria-label="Close history"></button>
+            </div>
+          </header>
+
+          <div class="history-search-wrap">
+            <span class="history-search-icon" aria-hidden="true"></span>
+            <input id="history-search" type="search" autocomplete="off" spellcheck="false" maxlength="200" aria-label="Search browsing history" placeholder="Search history" />
+            <button id="history-clear-search" class="history-clear-search" type="button" data-action="clear-history-search" aria-label="Clear history search" hidden></button>
+          </div>
+
+          <div class="history-summary-row">
+            <p id="history-summary" class="history-summary">Browsing history</p>
+            <p id="history-live-status" class="sr-only" role="status" aria-live="polite"></p>
+          </div>
+
+          <div id="history-results" class="history-results" role="list" aria-label="Browsing history" tabindex="-1"></div>
+
+          <footer id="history-selection-bar" class="history-selection-bar" hidden>
+            <strong id="history-selection-count">0 selected</strong>
+            <div class="history-selection-actions">
+              <button class="history-button secondary" type="button" data-action="cancel-history-selection">Cancel selection</button>
+              <button id="history-delete-selection" class="history-button danger" type="button" data-action="delete-history-selection">Delete</button>
+            </div>
+          </footer>
+        </div>
+      </section>
 
       <div id="popover-layer" class="popover-layer" aria-live="polite"></div>
       <div id="toast-layer" class="toast-layer" aria-live="polite"></div>
@@ -105,6 +175,38 @@
           <div class="text-prompt-actions">
             <button id="text-prompt-cancel" type="button" class="prompt-button secondary">Cancel</button>
             <button id="text-prompt-submit" type="submit" class="prompt-button primary">Create</button>
+          </div>
+        </form>
+      </dialog>
+
+      <dialog id="history-clear-dialog" class="history-clear-dialog" aria-labelledby="history-clear-title" aria-describedby="history-clear-description">
+        <form id="history-clear-form" class="history-clear-form">
+          <div class="history-clear-heading">
+            <h2 id="history-clear-title">Clear browsing history</h2>
+            <p id="history-clear-description">Only browsing history will be removed. Bookmarks, downloads, cookies, and site data are not affected.</p>
+          </div>
+
+          <fieldset class="history-clear-ranges">
+            <legend>Time range</legend>
+            <label><input type="radio" name="history-clear-range" value="last-hour" checked /><span>Last hour</span></label>
+            <label><input type="radio" name="history-clear-range" value="last-day" /><span>Last 24 hours</span></label>
+            <label><input type="radio" name="history-clear-range" value="last-week" /><span>Last 7 days</span></label>
+            <label><input type="radio" name="history-clear-range" value="last-four-weeks" /><span>Last 4 weeks</span></label>
+            <label><input type="radio" name="history-clear-range" value="custom" /><span>Custom interval</span></label>
+            <label><input type="radio" name="history-clear-range" value="all" /><span>All time</span></label>
+          </fieldset>
+
+          <div id="history-custom-range" class="history-custom-range" hidden>
+            <label>From<input id="history-clear-from" type="datetime-local" /></label>
+            <label>To<input id="history-clear-to" type="datetime-local" /></label>
+          </div>
+
+          <p id="history-clear-warning" class="history-clear-warning" role="alert" hidden>This permanently removes all browsing history. Choose “Clear all history” again to confirm.</p>
+          <p id="history-clear-error" class="history-clear-error" role="alert" hidden></p>
+
+          <div class="history-clear-actions">
+            <button type="button" class="prompt-button secondary" data-action="close-history-clear">Cancel</button>
+            <button id="history-clear-submit" type="submit" class="prompt-button primary">Clear history</button>
           </div>
         </form>
       </dialog>

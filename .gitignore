@@ -4,3 +4,7 @@ coverage/
 *.log
 .DS_Store
 browser-state.json
+artifacts/visual/
+artifacts/package/
+build/icon.iconset/
+tmp/

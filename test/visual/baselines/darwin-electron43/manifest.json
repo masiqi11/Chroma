@@ -1,0 +1,720 @@
+{
+  "schemaVersion": 2,
+  "platform": "darwin",
+  "electronMajor": 43,
+  "viewport": {
+    "width": 1280,
+    "height": 720
+  },
+  "dpr": 1,
+  "themes": [
+    "dark",
+    "light"
+  ],
+  "fontFamily": "Arial, Helvetica, sans-serif",
+  "motion": "disabled",
+  "fixturePort": 41727,
+  "thresholds": {
+    "pixel": 0.1,
+    "maxDiffRatio": 0.0025,
+    "geometryTolerance": 1
+  },
+  "scenarios": {
+    "expanded-dark": {
+      "geometry": {
+        "viewport": {
+          "width": 1280,
+          "height": 720
+        },
+        "contentBounds": {
+          "x": 228,
+          "y": 10,
+          "width": 1042,
+          "height": 700
+        },
+        "sidebar": {
+          "x": 0,
+          "y": 0,
+          "width": 228,
+          "height": 720
+        },
+        "sidebarDisplay": "flex",
+        "sidebarBorderRadius": 0,
+        "contentViewport": {
+          "x": 228,
+          "y": 10,
+          "width": 1042,
+          "height": 700
+        },
+        "peekTrigger": {
+          "x": 0,
+          "y": 0,
+          "width": 0,
+          "height": 0
+        },
+        "peekDisplay": "none",
+        "peekBackgroundColor": "rgba(0, 0, 0, 0)",
+        "trafficLights": {
+          "x": 8,
+          "y": 17.5,
+          "width": 65,
+          "height": 14
+        },
+        "addressForm": {
+          "x": 8,
+          "y": 46,
+          "width": 212,
+          "height": 36
+        },
+        "tabsList": {
+          "x": 8,
+          "y": 284.297,
+          "width": 212,
+          "height": 390.703
+        },
+        "splitCapsule": null,
+        "splitRows": [],
+        "paneFrames": [],
+        "visibleViews": [
+          {
+            "id": "tab-alpha",
+            "x": 228,
+            "y": 10,
+            "width": 1042,
+            "height": 700
+          }
+        ],
+        "sidebarOverlay": null
+      }
+    },
+    "split-2-dark-60-40": {
+      "geometry": {
+        "viewport": {
+          "width": 1280,
+          "height": 720
+        },
+        "contentBounds": {
+          "x": 228,
+          "y": 10,
+          "width": 1042,
+          "height": 700
+        },
+        "sidebar": {
+          "x": 0,
+          "y": 0,
+          "width": 228,
+          "height": 720
+        },
+        "sidebarDisplay": "flex",
+        "sidebarBorderRadius": 0,
+        "contentViewport": {
+          "x": 228,
+          "y": 10,
+          "width": 1042,
+          "height": 700
+        },
+        "peekTrigger": {
+          "x": 0,
+          "y": 0,
+          "width": 0,
+          "height": 0
+        },
+        "peekDisplay": "none",
+        "peekBackgroundColor": "rgba(0, 0, 0, 0)",
+        "trafficLights": {
+          "x": 8,
+          "y": 17.5,
+          "width": 65,
+          "height": 14
+        },
+        "addressForm": {
+          "x": 8,
+          "y": 46,
+          "width": 212,
+          "height": 36
+        },
+        "tabsList": {
+          "x": 8,
+          "y": 284.297,
+          "width": 212,
+          "height": 390.703
+        },
+        "splitCapsule": {
+          "x": 11,
+          "y": 354.297,
+          "width": 206,
+          "height": 36
+        },
+        "splitRows": [
+          {
+            "id": "tab-alpha",
+            "x": 11,
+            "y": 354.297,
+            "width": 123.594,
+            "height": 36
+          },
+          {
+            "id": "tab-beta",
+            "x": 134.594,
+            "y": 354.297,
+            "width": 82.391,
+            "height": 36
+          }
+        ],
+        "paneFrames": [
+          {
+            "id": "tab-alpha",
+            "x": 228,
+            "y": 10,
+            "width": 620,
+            "height": 700
+          },
+          {
+            "id": "tab-beta",
+            "x": 856,
+            "y": 10,
+            "width": 414,
+            "height": 700
+          }
+        ],
+        "visibleViews": [
+          {
+            "id": "tab-alpha",
+            "x": 230,
+            "y": 12,
+            "width": 616,
+            "height": 696
+          },
+          {
+            "id": "tab-beta",
+            "x": 858,
+            "y": 12,
+            "width": 410,
+            "height": 696
+          }
+        ],
+        "sidebarOverlay": null
+      }
+    },
+    "expanded-light": {
+      "geometry": {
+        "viewport": {
+          "width": 1280,
+          "height": 720
+        },
+        "contentBounds": {
+          "x": 228,
+          "y": 10,
+          "width": 1042,
+          "height": 700
+        },
+        "sidebar": {
+          "x": 0,
+          "y": 0,
+          "width": 228,
+          "height": 720
+        },
+        "sidebarDisplay": "flex",
+        "sidebarBorderRadius": 0,
+        "contentViewport": {
+          "x": 228,
+          "y": 10,
+          "width": 1042,
+          "height": 700
+        },
+        "peekTrigger": {
+          "x": 0,
+          "y": 0,
+          "width": 0,
+          "height": 0
+        },
+        "peekDisplay": "none",
+        "peekBackgroundColor": "rgba(0, 0, 0, 0)",
+        "trafficLights": {
+          "x": 8,
+          "y": 17.5,
+          "width": 65,
+          "height": 14
+        },
+        "addressForm": {
+          "x": 8,
+          "y": 46,
+          "width": 212,
+          "height": 36
+        },
+        "tabsList": {
+          "x": 8,
+          "y": 284.297,
+          "width": 212,
+          "height": 390.703
+        },
+        "splitCapsule": null,
+        "splitRows": [],
+        "paneFrames": [],
+        "visibleViews": [
+          {
+            "id": "tab-alpha",
+            "x": 228,
+            "y": 10,
+            "width": 1042,
+            "height": 700
+          }
+        ],
+        "sidebarOverlay": null
+      }
+    },
+    "collapsed-dark-hidden": {
+      "geometry": {
+        "viewport": {
+          "width": 1280,
+          "height": 720
+        },
+        "contentBounds": {
+          "x": 10,
+          "y": 10,
+          "width": 1260,
+          "height": 700
+        },
+        "sidebar": {
+          "x": 0,
+          "y": 0,
+          "width": 0,
+          "height": 0
+        },
+        "sidebarDisplay": "none",
+        "sidebarBorderRadius": 0,
+        "contentViewport": {
+          "x": 10,
+          "y": 10,
+          "width": 1260,
+          "height": 700
+        },
+        "peekTrigger": {
+          "x": 0,
+          "y": 0,
+          "width": 8,
+          "height": 720
+        },
+        "peekDisplay": "block",
+        "peekBackgroundColor": "rgba(0, 0, 0, 0)",
+        "trafficLights": {
+          "x": 0,
+          "y": 0,
+          "width": 0,
+          "height": 0
+        },
+        "addressForm": {
+          "x": 0,
+          "y": 0,
+          "width": 0,
+          "height": 0
+        },
+        "tabsList": {
+          "x": 0,
+          "y": 0,
+          "width": 0,
+          "height": 0
+        },
+        "splitCapsule": null,
+        "splitRows": [],
+        "paneFrames": [],
+        "visibleViews": [
+          {
+            "id": "tab-alpha",
+            "x": 10,
+            "y": 10,
+            "width": 1260,
+            "height": 700
+          }
+        ],
+        "sidebarOverlay": null
+      }
+    },
+    "overlay-dark": {
+      "geometry": {
+        "viewport": {
+          "width": 1280,
+          "height": 720
+        },
+        "contentBounds": {
+          "x": 10,
+          "y": 10,
+          "width": 1260,
+          "height": 700
+        },
+        "sidebar": {
+          "x": 0,
+          "y": 0,
+          "width": 0,
+          "height": 0
+        },
+        "sidebarDisplay": "none",
+        "sidebarBorderRadius": 0,
+        "contentViewport": {
+          "x": 10,
+          "y": 10,
+          "width": 1260,
+          "height": 700
+        },
+        "peekTrigger": {
+          "x": 0,
+          "y": 0,
+          "width": 8,
+          "height": 720
+        },
+        "peekDisplay": "block",
+        "peekBackgroundColor": "rgba(0, 0, 0, 0)",
+        "trafficLights": {
+          "x": 0,
+          "y": 0,
+          "width": 0,
+          "height": 0
+        },
+        "addressForm": {
+          "x": 0,
+          "y": 0,
+          "width": 0,
+          "height": 0
+        },
+        "tabsList": {
+          "x": 0,
+          "y": 0,
+          "width": 0,
+          "height": 0
+        },
+        "splitCapsule": null,
+        "splitRows": [],
+        "paneFrames": [],
+        "visibleViews": [
+          {
+            "id": "tab-alpha",
+            "x": 10,
+            "y": 10,
+            "width": 1260,
+            "height": 700
+          }
+        ],
+        "sidebarOverlay": {
+          "bounds": {
+            "x": 0,
+            "y": 0,
+            "width": 243,
+            "height": 720
+          },
+          "viewport": {
+            "width": 243,
+            "height": 720
+          },
+          "sidebar": {
+            "x": 5,
+            "y": 5,
+            "width": 228,
+            "height": 710
+          },
+          "sidebarDisplay": "flex",
+          "sidebarBorderRadius": 15,
+          "trafficLights": {
+            "x": 14,
+            "y": 23.5,
+            "width": 65,
+            "height": 14
+          },
+          "addressForm": {
+            "x": 14,
+            "y": 52,
+            "width": 210,
+            "height": 36
+          },
+          "tabsList": {
+            "x": 14,
+            "y": 289.906,
+            "width": 210,
+            "height": 379.094
+          },
+          "targetComposited": true
+        }
+      }
+    },
+    "split-3-dark": {
+      "geometry": {
+        "viewport": {
+          "width": 1280,
+          "height": 720
+        },
+        "contentBounds": {
+          "x": 228,
+          "y": 10,
+          "width": 1042,
+          "height": 700
+        },
+        "sidebar": {
+          "x": 0,
+          "y": 0,
+          "width": 228,
+          "height": 720
+        },
+        "sidebarDisplay": "flex",
+        "sidebarBorderRadius": 0,
+        "contentViewport": {
+          "x": 228,
+          "y": 10,
+          "width": 1042,
+          "height": 700
+        },
+        "peekTrigger": {
+          "x": 0,
+          "y": 0,
+          "width": 0,
+          "height": 0
+        },
+        "peekDisplay": "none",
+        "peekBackgroundColor": "rgba(0, 0, 0, 0)",
+        "trafficLights": {
+          "x": 8,
+          "y": 17.5,
+          "width": 65,
+          "height": 14
+        },
+        "addressForm": {
+          "x": 8,
+          "y": 46,
+          "width": 212,
+          "height": 36
+        },
+        "tabsList": {
+          "x": 8,
+          "y": 284.297,
+          "width": 212,
+          "height": 390.703
+        },
+        "splitCapsule": {
+          "x": 11,
+          "y": 354.297,
+          "width": 206,
+          "height": 69
+        },
+        "splitRows": [
+          {
+            "id": "tab-alpha",
+            "x": 11,
+            "y": 354.297,
+            "width": 103,
+            "height": 69
+          },
+          {
+            "id": "tab-beta",
+            "x": 114,
+            "y": 354.297,
+            "width": 103,
+            "height": 34.5
+          },
+          {
+            "id": "tab-gamma",
+            "x": 114,
+            "y": 388.797,
+            "width": 103,
+            "height": 34.5
+          }
+        ],
+        "paneFrames": [
+          {
+            "id": "tab-alpha",
+            "x": 228,
+            "y": 10,
+            "width": 517,
+            "height": 700
+          },
+          {
+            "id": "tab-beta",
+            "x": 753,
+            "y": 10,
+            "width": 517,
+            "height": 346
+          },
+          {
+            "id": "tab-gamma",
+            "x": 753,
+            "y": 364,
+            "width": 517,
+            "height": 346
+          }
+        ],
+        "visibleViews": [
+          {
+            "id": "tab-alpha",
+            "x": 230,
+            "y": 12,
+            "width": 513,
+            "height": 696
+          },
+          {
+            "id": "tab-beta",
+            "x": 755,
+            "y": 12,
+            "width": 513,
+            "height": 342
+          },
+          {
+            "id": "tab-gamma",
+            "x": 755,
+            "y": 366,
+            "width": 513,
+            "height": 342
+          }
+        ],
+        "sidebarOverlay": null
+      }
+    },
+    "split-4-dark": {
+      "geometry": {
+        "viewport": {
+          "width": 1280,
+          "height": 720
+        },
+        "contentBounds": {
+          "x": 228,
+          "y": 10,
+          "width": 1042,
+          "height": 700
+        },
+        "sidebar": {
+          "x": 0,
+          "y": 0,
+          "width": 228,
+          "height": 720
+        },
+        "sidebarDisplay": "flex",
+        "sidebarBorderRadius": 0,
+        "contentViewport": {
+          "x": 228,
+          "y": 10,
+          "width": 1042,
+          "height": 700
+        },
+        "peekTrigger": {
+          "x": 0,
+          "y": 0,
+          "width": 0,
+          "height": 0
+        },
+        "peekDisplay": "none",
+        "peekBackgroundColor": "rgba(0, 0, 0, 0)",
+        "trafficLights": {
+          "x": 8,
+          "y": 17.5,
+          "width": 65,
+          "height": 14
+        },
+        "addressForm": {
+          "x": 8,
+          "y": 46,
+          "width": 212,
+          "height": 36
+        },
+        "tabsList": {
+          "x": 8,
+          "y": 284.297,
+          "width": 212,
+          "height": 390.703
+        },
+        "splitCapsule": {
+          "x": 11,
+          "y": 354.297,
+          "width": 206,
+          "height": 69
+        },
+        "splitRows": [
+          {
+            "id": "tab-alpha",
+            "x": 11,
+            "y": 354.297,
+            "width": 103,
+            "height": 34.5
+          },
+          {
+            "id": "tab-beta",
+            "x": 11,
+            "y": 388.797,
+            "width": 103,
+            "height": 34.5
+          },
+          {
+            "id": "tab-delta",
+            "x": 114,
+            "y": 388.797,
+            "width": 103,
+            "height": 34.5
+          },
+          {
+            "id": "tab-gamma",
+            "x": 114,
+            "y": 354.297,
+            "width": 103,
+            "height": 34.5
+          }
+        ],
+        "paneFrames": [
+          {
+            "id": "tab-alpha",
+            "x": 228,
+            "y": 10,
+            "width": 517,
+            "height": 346
+          },
+          {
+            "id": "tab-beta",
+            "x": 228,
+            "y": 364,
+            "width": 517,
+            "height": 346
+          },
+          {
+            "id": "tab-delta",
+            "x": 753,
+            "y": 364,
+            "width": 517,
+            "height": 346
+          },
+          {
+            "id": "tab-gamma",
+            "x": 753,
+            "y": 10,
+            "width": 517,
+            "height": 346
+          }
+        ],
+        "visibleViews": [
+          {
+            "id": "tab-alpha",
+            "x": 230,
+            "y": 12,
+            "width": 513,
+            "height": 342
+          },
+          {
+            "id": "tab-beta",
+            "x": 230,
+            "y": 366,
+            "width": 513,
+            "height": 342
+          },
+          {
+            "id": "tab-delta",
+            "x": 755,
+            "y": 366,
+            "width": 513,
+            "height": 342
+          },
+          {
+            "id": "tab-gamma",
+            "x": 755,
+            "y": 12,
+            "width": 513,
+            "height": 342
+          }
+        ],
+        "sidebarOverlay": null
+      }
+    }
+  }
+}

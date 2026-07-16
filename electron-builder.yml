@@ -1,0 +1,50 @@
+appId: com.masiqi.chroma
+productName: Chroma
+asar: true
+compression: normal
+
+directories:
+  output: dist
+
+# Keep the distributable boundary explicit. Development tests, smoke harnesses,
+# documentation, generated artifacts, and local profile state are intentionally
+# outside this allow-list.
+files:
+  - package.json
+  - src/main/**/*
+  - src/preload/**/*
+  - src/renderer/**/*
+  - src/shared/**/*
+  - "!**/*.map"
+  - "!**/.DS_Store"
+
+# Keep the license material outside app.asar so it remains directly readable
+# from an installed bundle. This is the minimum local-distribution notice set;
+# a production release still needs a frozen-artifact legal/SBOM review.
+extraResources:
+  - from: LICENSE
+    to: licenses/Chroma-LICENSE.txt
+  - from: NOTICE.md
+    to: licenses/Chroma-NOTICE.md
+  - from: THIRD_PARTY_NOTICES.md
+    to: licenses/THIRD_PARTY_NOTICES.md
+  - from: node_modules/electron/LICENSE
+    to: licenses/Electron-LICENSE.txt
+  - from: node_modules/electron/dist/LICENSES.chromium.html
+    to: licenses/LICENSES.chromium.html
+
+mac:
+  # This checked-in configuration is the reproducible local unsigned gate.
+  # A production release must use a separate signing/notarization override.
+  icon: build/icon.icns
+  identity: null
+  hardenedRuntime: false
+  notarize: false
+  category: public.app-category.utilities
+  target:
+    - dmg
+    - zip
+  artifactName: "${productName}-${version}-${arch}-unsigned.${ext}"
+
+dmg:
+  title: "${productName} ${version} (Unsigned)"

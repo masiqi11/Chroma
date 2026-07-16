@@ -1,10 +1,10 @@
-const DEFAULT_SEARCH_TEMPLATE = "https://www.google.com/search?q=%s";
+import {
+  DEFAULT_SEARCH_PROVIDER_ID,
+  searchUrlForQuery,
+} from "./search-providers.mjs";
+
 const WEB_SCHEMES = new Set(["http:", "https:"]);
 const INTERNAL_SCHEMES = new Set(["chroma:"]);
-
-function searchUrl(query, template) {
-  return template.replace("%s", encodeURIComponent(query));
-}
 
 function looksLikeHost(value) {
   if (/^localhost(?::\d+)?(?:[/#?]|$)/i.test(value)) {
@@ -22,7 +22,7 @@ function looksLikeHost(value) {
 
 export function normalizeNavigationInput(
   input,
-  { searchTemplate = DEFAULT_SEARCH_TEMPLATE } = {}
+  { searchProviderId = DEFAULT_SEARCH_PROVIDER_ID } = {}
 ) {
   const value = String(input ?? "").trim();
   if (!value) {
@@ -47,7 +47,7 @@ export function normalizeNavigationInput(
     return new URL(`${scheme}://${value}`).href;
   }
 
-  return searchUrl(value, searchTemplate);
+  return searchUrlForQuery(value, searchProviderId);
 }
 
 export function displayNavigationUrl(url) {

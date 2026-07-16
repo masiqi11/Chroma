@@ -18,11 +18,23 @@
   "scripts": {
     "start": "electron .",
     "test": "node --test test/*.test.mjs",
-    "check": "node --check src/main/main.mjs && node --check src/main/browser-controller.mjs && node --check src/preload/shell-preload.cjs && npm test",
-    "smoke": "node scripts/runtime-smoke.mjs"
+    "check": "node --check src/main/main.mjs && node --check src/main/browser-controller.mjs && node --check src/main/process-output.mjs && node --check src/preload/shell-preload.cjs && npm test",
+    "smoke": "node scripts/runtime-smoke.mjs",
+    "visual": "node scripts/visual-smoke.mjs",
+    "visual:update": "node scripts/visual-smoke.mjs --update",
+    "session-smoke": "node scripts/session-smoke.mjs",
+    "window-lifecycle-smoke": "node scripts/window-lifecycle-smoke.mjs",
+    "package:dir": "CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac --dir",
+    "package:mac": "CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac dmg zip",
+    "package-smoke": "npm run package:dir && node scripts/package-smoke.mjs",
+    "verify": "npm run check && npm run window-lifecycle-smoke && npm run session-smoke && npm run smoke"
   },
   "devDependencies": {
-    "electron": "43.1.0"
+    "@electron/asar": "3.4.1",
+    "electron": "43.1.0",
+    "electron-builder": "26.15.3",
+    "pixelmatch": "7.1.0",
+    "pngjs": "7.0.0"
   },
   "engines": {
     "node": ">=22"
