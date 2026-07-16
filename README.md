@@ -23,6 +23,8 @@ or endorsed by The Browser Company or the Zen Browser project.
 - [`docs/PARITY.md`](docs/PARITY.md): capability status and remaining work
 - [`TESTING.md`](TESTING.md): automated evidence, package/visual gates, partial
   packaged-GUI acceptance, and the remaining manual gesture checklist
+- [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md): repeatable startup/RSS gate,
+  thresholds, current measurements, and interpretation limits
 - [`UI_COMPARISON.md`](UI_COMPARISON.md): Chroma self-regression baselines and
   the limits of comparison with external browsers
 - [`docs/HISTORY-SPEC.md`](docs/HISTORY-SPEC.md): local history contract
@@ -42,10 +44,15 @@ or endorsed by The Browser Company or the Zen Browser project.
 - Real Chromium navigation with address/search input, back, forward, reload,
   stop, titles, favicons, popup-to-tab routing, and a Chroma new-tab page.
 - Multiple live tabs with selection, pointer reordering, close/reopen, audio
-  state, mute, and Essentials.
-- Persisted workspaces, basic folders, and folder drag-in/drag-out. State load
-  also repairs invalid folder/split IDs and memberships instead of letting a
-  damaged topology break the library.
+  state, mute, and Essentials. If a page renderer exits, Chroma hides only the
+  affected native pane and presents an accessible Reload/Close recovery card;
+  recovery preserves the tab ID, URL, workspace, folder, and split topology.
+- Persisted workspaces with creation, switching, drag reordering, confirmed
+  deletion, and context-menu movement of ordinary tabs between Spaces. The
+  final Space cannot be deleted, and protected pinned, Essential, folder, or
+  split tabs are not silently detached by a cross-Space move. Basic folders
+  support drag-in/drag-out, while state load repairs invalid folder/split IDs
+  and memberships instead of letting damaged topology break the library.
 - Basic local bookmarks: star/unstar the active HTTP(S) page, browse saved
   pages in the sidebar, open them in a tab, remove them, and restore them with
   the profile. Bookmark folders and import/export are not implemented yet.
@@ -53,9 +60,16 @@ or endorsed by The Browser Company or the Zen Browser project.
   date grouping, individual/selection deletion, confirmed time-range clearing,
   address suggestions, persistent recording/retention/clear-on-exit
   preferences, and `Cmd+Y` (macOS) / `Ctrl+H` (Windows and Linux) access.
-- A shell-owned command palette on `Cmd/Ctrl+Shift+P` with ranked English and
-  Chinese search, contextual availability, keyboard navigation, and explicit
-  adapters to the allow-listed browser command boundary.
+- A shell-owned command palette opened from the visible Commands control, with
+  ranked English and Chinese search, contextual availability, keyboard
+  navigation, and explicit adapters to the allow-listed browser command
+  boundary.
+- One immutable browser-shortcut registry shared by the application menu,
+  shell, floating sidebar, and page hosts. Matching uses exact modifier sets,
+  maps Primary to Command on macOS and Control elsewhere, keeps literal
+  Control distinct on macOS, and covers navigation, tabs, Spaces, split view,
+  page zoom, history, downloads, bookmarks, sidebar, and developer tools.
+  `Cmd/Ctrl+Shift+P` is deliberately not consumed by the command palette.
 - Two-to-four-pane browsing using live `WebContentsView` instances. Tabs can be
   dragged onto one another to create a split, reordered inside the split
   capsule, and dragged back out to detach. The active capsule mirrors the pane
@@ -110,12 +124,12 @@ npm run verify
 ```
 
 `verify` is the complete serial Electron gate. It runs `check`,
-`window-lifecycle-smoke`, `session-smoke`, and `smoke` in that order and stops
-at the first failure. `check` alone is intentionally limited to syntax
-validation and Node unit/source-contract tests for navigation, layout, state
-repair, history and persistence services, command/preload boundaries, and
-process-output handling; it does not launch Electron and must not be treated as
-proof that the browser UI starts or stays alive.
+`window-lifecycle-smoke`, `session-smoke`, `smoke`, and `performance` in that
+order and stops at the first failure. `check` alone is intentionally limited to
+syntax validation and Node unit/source-contract tests for navigation, layout,
+state repair, history and persistence services, command/preload boundaries,
+and process-output handling; it does not launch Electron and must not be
+treated as proof that the browser UI starts or stays alive.
 
 The Electron stages cover different runtime boundaries.
 `window-lifecycle-smoke` verifies concurrent startup URLs, single-window
@@ -128,10 +142,21 @@ and exercises the bridge, live navigation, local bookmarks, the complete local
 history flow, command-palette search/execution, tab/workspace/folder behavior,
 split composition/reordering/detach, live split-divider preview and durable
 ratio commit, capsule geometry, Appearance UI/runtime/disk persistence, sidebar
-overlay layering, responsive native bounds, sandbox isolation, user-agent
-handling, broken output pipes, and `WebContents` cleanup. These runtime checks
+overlay layering, responsive native bounds, exact shell/page shortcut routing,
+workspace reorder/delete/tab movement, renderer-crash recovery, sandbox
+isolation, user-agent handling, broken output pipes, and `WebContents` cleanup.
+These runtime checks
 verify state, native-theme propagation, and shell behavior; they are not a
 pixel-parity or cross-platform native-material certification.
+
+The final `performance` stage launches another isolated profile against local
+fixtures, records shell-ready and first-page-ready time, samples complete
+Electron process-tree RSS for one and eight loaded tabs, and fails conservative
+regression ceilings. Its current method, platform limits, and recorded result
+are in [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md).
+Because RSS sampling currently requires `ps`, this stage supports macOS/Linux;
+on Windows `verify` fails explicitly at `performance` instead of reporting a
+false pass.
 
 The deterministic renderer visual gate is separate from `verify`:
 
@@ -148,8 +173,8 @@ vibrancy, Mica, system shadows, and other platforms remain outside this
 software-raster gate. Baselines can be rewritten only with
 `CHROMA_UPDATE_VISUAL_BASELINES=1 npm run visual:update`.
 Exact baseline, capture, diff, and manifest paths are listed in
-[`UI_COMPARISON.md`](UI_COMPARISON.md); a zero Chroma self-diff is not an Arc or
-Zen similarity score.
+[`UI_COMPARISON.md`](UI_COMPARISON.md); a passing Chroma self-regression diff is
+not an Arc or Zen similarity score.
 
 ## Local unsigned macOS packaging
 
@@ -198,12 +223,12 @@ Renderer shell and interaction state
 ```
 
 - `src/shared/` contains navigation rules, the versioned state schema, command
-  names and search ranking, the split ratio tree and geometry, appearance
-  sanitization, and persisted-library topology repair. The current profile is
-  schema 6: bounded history entered in schema 3, terminal download metadata in
-  schema 4, durable split ratio trees in schema 5, and persisted Appearance
-  preferences in schema 6. Space colors remain properties of their respective
-  workspaces.
+  names, shortcut routing and search ranking, the split ratio tree and geometry,
+  appearance sanitization, and persisted-library topology repair. The current
+  profile is schema 6: bounded history entered in schema 3, terminal download
+  metadata in schema 4, durable split ratio trees in schema 5, and persisted
+  Appearance preferences in schema 6. Space colors remain properties of their
+  respective workspaces.
 - `src/renderer/` implements the Chroma shell and never imports Electron.
 - `src/preload/` exposes the narrow `window.chromaBrowser` bridge.
 - `src/main/` owns windows, page views, navigation, history, downloads,
@@ -213,6 +238,8 @@ Renderer shell and interaction state
   conformance test.
 - `scripts/window-lifecycle-smoke.mjs` is the concurrent-window and failed-start
   recovery conformance test.
+- `scripts/performance-smoke.mjs` is the isolated local-fixture startup and
+  process-tree RSS regression gate.
 
 This separation leaves room for a future direct Chromium browser-layer host
 without treating the Electron prototype as disposable UI code. See

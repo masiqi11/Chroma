@@ -37,6 +37,7 @@ const requiredEntries = [
   "src/shared/navigation.mjs",
   "src/shared/page-zoom.mjs",
   "src/shared/search-providers.mjs",
+  "src/shared/shortcut-registry.mjs",
   "src/shared/split-ratios.mjs",
   "src/shared/state-invariants.mjs",
 ];

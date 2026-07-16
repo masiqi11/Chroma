@@ -14,6 +14,7 @@ const channels = Object.freeze({
   windowDragEnd: "chroma:window-drag-end",
   windowControl: "chroma:window-control",
   openHistory: "chroma:open-history",
+  openDownloads: "chroma:open-downloads",
   openCommandPalette: "chroma:open-command-palette",
   invoke: "chroma:invoke",
 });
@@ -22,17 +23,21 @@ const commandNames = new Set([
   "tab:create",
   "tab:select",
   "tab:close",
+  "tab:recover",
   "tab:reopen",
   "tab:reorder",
   "navigation:go",
   "navigation:back",
   "navigation:forward",
   "navigation:reload",
+  "navigation:reload-ignore-cache",
   "navigation:stop",
   "tab:toggle-mute",
   "tab:toggle-pin",
   "tab:toggle-essential",
   "bookmark:toggle",
+  "tab:select-next",
+  "tab:select-previous",
   "bookmark:remove",
   "history:query",
   "history:suggest",
@@ -50,6 +55,11 @@ const commandNames = new Set([
   "workspace:create",
   "workspace:select",
   "workspace:rename",
+  "workspace:delete",
+  "workspace:reorder",
+  "tab:move-to-workspace",
+  "workspace:next",
+  "workspace:previous",
   "split:active",
   "split:tabs",
   "split:detach",
@@ -62,6 +72,10 @@ const commandNames = new Set([
   "sidebar:toggle",
   "sidebar:set-width",
   "settings:set-appearance",
+  "page:zoom-in",
+  "page:zoom-out",
+  "page:zoom-reset",
+  "downloads:open",
   "developer:open-tools",
 ]);
 
@@ -74,7 +88,11 @@ contextBridge.exposeInMainWorld(
   "chromaBrowser",
   Object.freeze({
     getState: () => ipcRenderer.invoke(channels.getState),
-    getSmokeViewports: () => ipcRenderer.invoke(channels.smokeViewports),
+    getSmokeViewports: options => ipcRenderer.invoke(channels.smokeViewports, {
+      forceCrashTabId: typeof options?.forceCrashTabId === "string"
+        ? options.forceCrashTabId.slice(0, 199)
+        : null,
+    }),
     command: (name, payload = {}) => {
       if (!commandNames.has(name)) {
         return Promise.reject(new Error(`Unknown browser command: ${name}`));
@@ -172,6 +190,12 @@ contextBridge.exposeInMainWorld(
       const handler = () => listener();
       ipcRenderer.on(channels.openHistory, handler);
       return () => ipcRenderer.removeListener(channels.openHistory, handler);
+    },
+    onOpenDownloads: listener => {
+      if (typeof listener !== "function") return () => {};
+      const handler = () => listener();
+      ipcRenderer.on(channels.openDownloads, handler);
+      return () => ipcRenderer.removeListener(channels.openDownloads, handler);
     },
     onOpenCommandPalette: listener => {
       if (typeof listener !== "function") return () => {};

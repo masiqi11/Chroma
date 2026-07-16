@@ -145,6 +145,25 @@ separate allow-listed channel so high-frequency movement never performs a
 profile write. The stable divider path identifies the ratio-tree node, and only
 the final ratio crosses the durable command boundary.
 
+Workspace controls are a small, self-contained exception: accessible Space
+buttons use roving tabindex plus Arrow/Home/End switching, and native drag/drop
+to reorder the persisted sequence. The renderer calculates before/after
+feedback, but the controller validates both IDs and commits the reorder without
+changing active tabs or container topology. Keyboard reordering remains future
+work.
+
+Moving a tab across Spaces is explicit rather than an accidental side effect of
+drag geometry. The context menu exposes only other Spaces and the controller
+accepts only an ordinary ungrouped, unpinned, non-Essential, unsplit tab. If it
+was the source Space's final tab, a replacement new tab is created first. At
+the global tab cap that final-tab move is rejected rather than creating a 513th
+record that persistence would truncate.
+
+Confirmed Space deletion removes its complete tab/folder/split ownership in one
+domain-state commit, chooses the next or previous Space deterministically when
+the active Space is removed, and destroys the removed native views afterward.
+The final Space cannot be deleted.
+
 ### Arc-inspired baseplate and compact sidebar
 
 The shell is a double-layer baseplate rather than a toolbar placed beside a
@@ -179,6 +198,21 @@ and stderr have narrow guards for `EPIPE` and `ERR_STREAM_DESTROYED`, so a test
 harness or launcher closing its output pipe cannot turn a later renderer log
 message into an uncaught exception. Other stream errors remain fatal instead of
 being silently hidden.
+
+### Crashed page recovery preserves the browser model
+
+A page renderer failure is not treated as a tab or split deletion.
+`render-process-gone` marks the tab crashed, cancels its adaptive work, and
+hides only that pane's native view. In a split, healthy siblings remain live and
+visible. The trusted shell draws an accessible Reload/Close recovery card above
+the failed surface.
+
+Reload clears the crash state and reuses a surviving `WebContents`. If Electron
+has already destroyed it, the controller removes the stale view and creates a
+new one for the same tab record. Both paths preserve the tab ID, URL, workspace,
+folder, split membership, and ratio tree. Unknown or healthy tabs reject the
+recovery command. This is renderer recovery, not production crash reporting or
+dirty multi-window session restoration; those remain separate work.
 
 ### Persisted library topology is repaired as one graph
 
@@ -230,15 +264,46 @@ schemes, credentials, and fragments are not recorded. Default retention,
 migration, command, and privacy rules are defined in
 [`docs/HISTORY-SPEC.md`](docs/HISTORY-SPEC.md).
 
+### One shortcut registry owns browser chords
+
+`src/shared/shortcut-registry.mjs` declares immutable action/chord records,
+platform display labels, and application-menu accelerator labels. Primary maps
+to Command on macOS and Control on Windows/Linux; literal Control remains a
+separate modifier so Ctrl+Tab keeps its browser meaning on macOS. Matching is
+exact: an extra Shift or Alt cannot trigger a less-specific command, and repeat,
+composition, and key-up input are ignored. Electron's real Windows/Linux AltGr
+normalization still requires platform acceptance and must not be inferred from
+synthetic `altGraph` input alone.
+
+The controller attaches the same Electron `before-input-event` router to the
+shell, floating sidebar, and every page host. The shared action path covers
+address focus, tab create/reopen/close/cycle, reload/hard reload, back/forward,
+bookmarks, history, downloads, sidebar, workspace cycle, split create/remove,
+page zoom, and developer tools. Application-menu accelerators are labels from
+the same registry but use `registerAccelerator: false`, avoiding a second
+dispatch path while the shell is focused. The renderer consumes the registry
+for command-palette labels and does not maintain a competing browser-keydown
+table.
+
+Once an exact browser chord matches, the host consumes it even when its action
+is currently unavailable—for example Back with no page history or Ctrl+Tab
+with one tab—so browser-owned input does not leak into website JavaScript. The
+entry point rejects commands during teardown, catches native-wrapper races, and
+uses guarded `WebContents` access. History and Downloads invoked while the
+floating sidebar is focused first retire that overlay before showing the main
+shell surface.
+
 ### The command palette is shell-owned and explicitly adapted
 
 `src/shared/command-search.mjs` owns the immutable catalog, Unicode/CJK
 normalization, contextual enablement, and deterministic ranking. The trusted
 shell renders the glass command surface and maps every result through an
 explicit action adapter. It never forwards arbitrary catalog strings to the
-preload bridge. Page-focused `Cmd/Ctrl+Shift+P` is intercepted by the owning
-controller and only sends a shell notification; the page receives no Electron
-or command capability.
+preload bridge. The palette opens from the visible Commands control. It has no
+default chord in the registry; in particular, `Cmd/Ctrl+Shift+P` is left
+unconsumed for the Zen/Firefox private-window convention rather than being
+repurposed. Private-window behavior itself is not implemented in this
+milestone.
 
 ### Downloads separate native lifetime from durable metadata
 
@@ -277,6 +342,24 @@ so independent per-window themes remain future multi-window work. Runtime smoke
 validates the Appearance form, native color-scheme propagation, reduced-shell
 styling, active-Space accent, and profile-file persistence; it does not certify
 pixel identity, native vibrancy, or Windows/Linux material rendering.
+
+### Performance is gated with deterministic local fixtures
+
+`scripts/performance-smoke.mjs` launches the real Electron host with a new
+temporary profile and loopback `no-store` pages. It gates process-launch shell
+readiness, first-local-page readiness, settled one-tab process-tree RSS,
+settled eight-tab RSS, and their delta. RSS is the median of five `ps` samples
+after a one-second settle, with peaks and descendant-process counts retained
+for diagnosis. The host's managed-view count, not Chromium's same-origin
+process count, is the tab ownership invariant.
+
+This is deliberately a regression ceiling rather than a marketing benchmark.
+The smoke configuration disables hardware acceleration, local fixtures exclude
+network and complex-site cost, and the `ps` sampler currently supports macOS
+and Linux only. GPU/native-material cost, Windows, CPU, energy, interaction
+latency, tab discard, and long-session leak profiling remain outside the gate.
+The exact thresholds, current measurements, and interpretation limits are in
+[`docs/PERFORMANCE.md`](docs/PERFORMANCE.md).
 
 ### Local packaging has an explicit, independently tested boundary
 
@@ -324,22 +407,23 @@ remaining real-pointer/keyboard checklist are recorded in
   schema-6 state repair and migration, Appearance sanitization and command/host
   contracts, history and download service operations,
   bookmark sanitization, topology repair, command search/ranking, navigation
-  normalization, bridge command contracts, process-output guards, and atomic
-  persistence. It does not launch Electron and is not evidence that the
-  browser window or page host runs successfully.
+  normalization, workspace lifecycle, exact shortcut matching, crashed-tab
+  recovery, bridge command contracts, process-output guards, and atomic
+  persistence. It does not launch Electron and is not evidence that the browser
+  window or page host runs successfully.
 - The runtime smoke test launches an isolated Electron profile and exercises
   live navigation, new-tab search, command-palette CJK search/execution,
   bookmark star/open/remove/persistence, live download
   pause/resume/cancel/UI/terminal persistence, the
   history panel/search/deletion/range clearing/preferences/privacy contract,
   Appearance UI, native-theme propagation, reduced-transparency behavior and
-  disk persistence, workspace/folder creation, folder drag-in and drag-out,
-  left/right tab
-  merging, split reordering and detaching, live divider preview, durable ratio
-  persistence, active and compact capsule geometry, zero-width sidebar
-  collapse, the rounded overlay's z-order, neutral split frames, responsive
-  native bounds, sandbox isolation, a deliberately closed output pipe, tab
-  cleanup, and clean window close.
+  disk persistence, workspace/folder creation, workspace reorder/delete/tab
+  movement, folder drag-in and drag-out, left/right tab merging, split
+  reordering and detaching, live divider preview, durable ratio persistence,
+  active and compact capsule geometry, exact shell/page shortcut input,
+  renderer-crash recovery, zero-width sidebar collapse, the rounded overlay's
+  z-order, neutral split frames, responsive native bounds, sandbox isolation, a
+  deliberately closed output pipe, tab cleanup, and clean window close.
 - A local fixture returns a fixed-width desktop document for a desktop user
   agent and responsive markup for a mobile user agent. The smoke test verifies
   page zoom remains `1`, readable text is preserved, transitions reload only as
@@ -354,8 +438,14 @@ remaining real-pointer/keyboard checklist are recorded in
   single-window ownership, failed-window cleanup, and FIFO recovery of queued
   URLs after an injected creation failure.
 - `npm run verify` is the complete release gate. It serially runs `check`,
-  `window-lifecycle-smoke`, `session-smoke`, and the full runtime `smoke`, and
-  stops at the first failure.
+  `window-lifecycle-smoke`, `session-smoke`, the full runtime `smoke`, and
+  `performance`, and stops at the first failure.
+- `npm run performance` launches a separate isolated profile against local
+  fixtures, gates shell/first-page readiness and one/eight-tab process-tree RSS,
+  rejects known fatal output, and writes
+  `artifacts/performance/report.json`. It is a software-rendered macOS/Linux
+  regression gate, not a real-site, Windows, GPU, CPU, energy, or long-session
+  benchmark.
 - `npm run package-smoke` is the separate local bundle gate. It rebuilds the
   unsigned directory target, verifies the ASAR boundary and bundle metadata,
   launches the packaged executable, and fails on missing bridge state or known
@@ -369,6 +459,12 @@ remaining real-pointer/keyboard checklist are recorded in
   and other platforms need separate baselines and acceptance.
 
 ## Change history
+
+- 2026-07-16: Added host-validated Space deletion/reordering/eligible-tab
+  movement, shell-owned crashed-pane recovery that preserves tab topology, and
+  one exact platform-aware shortcut registry for shell/page/overlay input,
+  menu labels, and command labels. Added a deterministic startup/RSS gate to
+  `verify` with a checked machine-readable performance report.
 
 - 2026-07-16: Hardened page-state and permission boundaries with bounded
   IDs/tabs/URLs/favicons, credential-free durable URLs, redacted navigation

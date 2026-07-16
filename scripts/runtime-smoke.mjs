@@ -19,10 +19,39 @@ let report;
 let testServer;
 let overlayClient;
 const adaptiveRequests = new Map();
+const cdpClients = new Set();
 let explicitHangRequests = 0;
+
+const CDP_OPEN_TIMEOUT_MS = 5_000;
+const CDP_SEND_TIMEOUT_MS = 15_000;
+const CDP_CLOSE_TIMEOUT_MS = 1_500;
+const SERVER_CLOSE_TIMEOUT_MS = 1_500;
 
 function delay(milliseconds) {
   return new Promise(resolve => setTimeout(resolve, milliseconds));
+}
+
+function withTimeout(promise, milliseconds, label, onTimeout) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      try {
+        onTimeout?.();
+      } catch {
+        // Preserve the timeout as the actionable failure.
+      }
+      reject(new Error(`${label} timed out after ${milliseconds}ms`));
+    }, milliseconds);
+    Promise.resolve(promise).then(
+      value => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      error => {
+        clearTimeout(timer);
+        reject(error);
+      }
+    );
+  });
 }
 
 async function waitFor(callback, timeout = 20_000) {
@@ -116,6 +145,7 @@ class CdpClient {
 
   constructor(url) {
     this.#socket = new WebSocket(url);
+    cdpClients.add(this);
     this.#socket.onmessage = event => {
       const message = JSON.parse(event.data);
       if (!message.id) return;
@@ -129,22 +159,71 @@ class CdpClient {
       const error = new Error("DevTools connection closed");
       for (const pending of this.#pending.values()) pending.reject(error);
       this.#pending.clear();
+      cdpClients.delete(this);
     };
   }
 
   async open() {
     if (this.#socket.readyState === WebSocket.OPEN) return;
-    await new Promise((resolve, reject) => {
-      this.#socket.onopen = resolve;
-      this.#socket.onerror = reject;
+    if (this.#socket.readyState !== WebSocket.CONNECTING) {
+      throw new Error("DevTools connection is not available");
+    }
+    let resolveOpen;
+    let rejectOpen;
+    const opened = new Promise((resolve, reject) => {
+      resolveOpen = resolve;
+      rejectOpen = reject;
     });
+    const handleOpen = () => resolveOpen();
+    const handleError = () => rejectOpen(new Error("DevTools connection failed"));
+    const handleClose = () => rejectOpen(new Error("DevTools connection closed before opening"));
+    this.#socket.addEventListener("open", handleOpen, { once: true });
+    this.#socket.addEventListener("error", handleError, { once: true });
+    this.#socket.addEventListener("close", handleClose, { once: true });
+    try {
+      await withTimeout(opened, CDP_OPEN_TIMEOUT_MS, "DevTools connection open", () => {
+        this.#socket.close();
+      });
+    } finally {
+      this.#socket.removeEventListener("open", handleOpen);
+      this.#socket.removeEventListener("error", handleError);
+      this.#socket.removeEventListener("close", handleClose);
+    }
   }
 
   send(method, params = {}) {
+    if (this.#socket.readyState !== WebSocket.OPEN) {
+      return Promise.reject(new Error(`DevTools connection is not open for ${method}`));
+    }
     const id = ++this.#nextId;
-    const promise = new Promise((resolve, reject) => this.#pending.set(id, { resolve, reject }));
-    this.#socket.send(JSON.stringify({ id, method, params }));
-    return promise;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        if (!this.#pending.delete(id)) return;
+        const detail = method === "Runtime.evaluate"
+          ? ` (${String(params.expression || "").replace(/\s+/g, " ").slice(0, 160)})`
+          : "";
+        reject(new Error(
+          `DevTools ${method}${detail} timed out after ${CDP_SEND_TIMEOUT_MS}ms`
+        ));
+      }, CDP_SEND_TIMEOUT_MS);
+      this.#pending.set(id, {
+        resolve(value) {
+          clearTimeout(timer);
+          resolve(value);
+        },
+        reject(error) {
+          clearTimeout(timer);
+          reject(error);
+        },
+      });
+      try {
+        this.#socket.send(JSON.stringify({ id, method, params }));
+      } catch (error) {
+        const pending = this.#pending.get(id);
+        this.#pending.delete(id);
+        pending?.reject(error);
+      }
+    });
   }
 
   async evaluate(expression) {
@@ -161,13 +240,123 @@ class CdpClient {
   }
 
   async close() {
-    if (this.#socket.readyState === WebSocket.CLOSED) return;
-    const closed = new Promise(resolve =>
-      this.#socket.addEventListener("close", resolve, { once: true })
-    );
-    this.#socket.close();
-    await Promise.race([closed, delay(1_000)]);
+    const closeError = new Error("DevTools connection closed by smoke teardown");
+    for (const pending of this.#pending.values()) pending.reject(closeError);
+    this.#pending.clear();
+    if (this.#socket.readyState === WebSocket.CLOSED) {
+      cdpClients.delete(this);
+      return;
+    }
+    let resolveClose;
+    const closed = new Promise(resolve => {
+      resolveClose = resolve;
+    });
+    const handleClose = () => resolveClose();
+    this.#socket.addEventListener("close", handleClose, { once: true });
+    try {
+      this.#socket.close();
+      await withTimeout(closed, CDP_CLOSE_TIMEOUT_MS, "DevTools connection close", () => {
+        this.#socket.close();
+      });
+    } finally {
+      this.#socket.removeEventListener("close", handleClose);
+      this.#socket.onmessage = null;
+      this.#socket.onclose = null;
+      cdpClients.delete(this);
+    }
   }
+}
+
+async function closeAllCdpClients() {
+  const results = await Promise.allSettled(
+    [...cdpClients].map(cdpClient => cdpClient.close())
+  );
+  const failures = results
+    .filter(result => result.status === "rejected")
+    .map(result => result.reason);
+  if (failures.length > 0) {
+    throw new AggregateError(failures, "one or more DevTools connections did not close");
+  }
+}
+
+function childIsRunning(process) {
+  return process && process.exitCode === null && process.signalCode === null;
+}
+
+function waitForChildExit(process, timeout) {
+  if (!childIsRunning(process)) return Promise.resolve(true);
+  return new Promise(resolve => {
+    const finish = value => {
+      clearTimeout(timer);
+      process.removeListener("exit", handleExit);
+      resolve(value);
+    };
+    const handleExit = () => finish(true);
+    const timer = setTimeout(() => finish(false), timeout);
+    process.once("exit", handleExit);
+  });
+}
+
+async function terminateChild(process) {
+  if (!process) return;
+  if (childIsRunning(process)) {
+    process.kill("SIGTERM");
+    if (!await waitForChildExit(process, 1_500)) {
+      process.kill("SIGKILL");
+      if (!await waitForChildExit(process, 1_500)) {
+        process.unref();
+        throw new Error("Electron process did not exit after SIGKILL");
+      }
+    }
+  }
+  process.stdout?.destroy();
+  process.stderr?.destroy();
+  process.stdin?.destroy();
+}
+
+async function closeTestServer(server) {
+  if (!server) return;
+  server.unref();
+  if (!server.listening) return;
+  let resolveClose;
+  let rejectClose;
+  const closed = new Promise((resolve, reject) => {
+    resolveClose = resolve;
+    rejectClose = reject;
+  });
+  server.close(error => {
+    if (error && error.code !== "ERR_SERVER_NOT_RUNNING") rejectClose(error);
+    else resolveClose();
+  });
+  server.closeIdleConnections?.();
+  server.closeAllConnections?.();
+  await withTimeout(closed, SERVER_CLOSE_TIMEOUT_MS, "test server close", () => {
+    server.closeIdleConnections?.();
+    server.closeAllConnections?.();
+  });
+}
+
+async function dispatchKeyChord(client, {
+  code,
+  key,
+  modifiers = 0,
+  virtualKeyCode = String(key || "").toUpperCase().charCodeAt(0) || 0,
+}) {
+  const common = {
+    code,
+    key,
+    modifiers,
+    windowsVirtualKeyCode: virtualKeyCode,
+    nativeVirtualKeyCode: virtualKeyCode,
+  };
+  await client.send("Input.dispatchKeyEvent", {
+    type: "rawKeyDown",
+    ...common,
+  });
+  await client.send("Input.dispatchKeyEvent", {
+    type: "keyUp",
+    ...common,
+  });
 }
 
 try {
@@ -366,17 +555,21 @@ try {
   });
   assert.ok(draggedWindowState.runtime.windowBounds);
 
-  const paletteShortcut = initial.runtime.platform === "darwin"
-    ? { metaKey: true }
-    : { ctrlKey: true };
-  await client.evaluate(`document.dispatchEvent(new KeyboardEvent('keydown', {
-    key: 'p',
-    code: 'KeyP',
-    shiftKey: true,
-    bubbles: true,
-    cancelable: true,
-    ...${JSON.stringify(paletteShortcut)},
-  }))`);
+  const primaryModifierMask = initial.runtime.platform === "darwin" ? 4 : 2;
+  await dispatchKeyChord(client, {
+    code: "KeyP",
+    key: "p",
+    modifiers: primaryModifierMask | 8,
+  });
+  await delay(150);
+  assert.equal(
+    await client.evaluate("document.querySelector('#command-palette').hidden"),
+    true,
+    "Primary+Shift+P must remain available for the Zen/Firefox private-window convention"
+  );
+  await client.evaluate(
+    "document.querySelector('[data-action=\"open-command-palette\"]').click()"
+  );
   await waitFor(async () => {
     const candidate = await client.evaluate("window.chromaBrowser.getState()");
     const palette = await client.evaluate(`(() => {
@@ -467,9 +660,30 @@ try {
     itemCount: 0,
   });
 
-  await client.evaluate(
-    "document.querySelector('[data-action=\"toggle-bookmark\"]').click()"
+  const testPageTarget = await waitFor(async () => {
+    const list = await targets();
+    return list.find(target => target.type === "page" && target.url === exampleUrl);
+  });
+  const testPageClient = new CdpClient(testPageTarget.webSocketDebuggerUrl);
+  await testPageClient.open();
+  await dispatchKeyChord(testPageClient, {
+    code: "KeyW",
+    key: "w",
+    modifiers: primaryModifierMask | 8,
+  });
+  await delay(150);
+  assert.equal(
+    (await client.evaluate("window.chromaBrowser.getState()"))
+      .tabs.some(tab => tab.id === testTabId),
+    true,
+    "an extra Shift modifier leaked through the close-tab shortcut"
   );
+  await dispatchKeyChord(testPageClient, {
+    code: "KeyD",
+    key: "d",
+    modifiers: primaryModifierMask,
+  });
+  await testPageClient.close();
   const bookmarkedPage = await waitFor(async () => {
     const candidate = await client.evaluate("window.chromaBrowser.getState()");
     const bookmark = candidate.bookmarks?.find(item => item.url === exampleUrl);
@@ -512,6 +726,37 @@ try {
   });
   assert.equal(persistedBookmark.url, exampleUrl);
   assert.equal(persistedBookmark.title, "Example Domain");
+
+  const shellShortcutBefore = await client.evaluate(
+    "window.chromaBrowser.getState()"
+  );
+  await client.evaluate("window.focus()");
+  await dispatchKeyChord(client, {
+    code: "KeyT",
+    key: "t",
+    modifiers: primaryModifierMask,
+  });
+  const shellShortcutTab = await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    const created = candidate.tabs.find(tab =>
+      !shellShortcutBefore.tabs.some(previous => previous.id === tab.id)
+    );
+    return candidate.tabs.length === shellShortcutBefore.tabs.length + 1 &&
+      created?.id === candidate.activeTabId
+      ? created
+      : false;
+  });
+  await client.evaluate(
+    `window.chromaBrowser.command('tab:close', { id: ${JSON.stringify(shellShortcutTab.id)} })`
+  );
+  await client.evaluate(
+    `window.chromaBrowser.command('tab:select', { id: ${JSON.stringify(testTabId)} })`
+  );
+  await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    return candidate.tabs.length === shellShortcutBefore.tabs.length &&
+      candidate.activeTabId === testTabId;
+  });
 
   // Exercise ordinary pinned tabs through the real shell and native page
   // lifecycle. Pinning must promote the tab out of folder/ordinary topology,
@@ -2541,6 +2786,112 @@ try {
       candidate.runtime.liveWebContentsCount === candidate.runtime.managedViewCount + 2;
   }, 5_000);
 
+  const crashRecoveryUrl = `${baseUrl}/crash-recovery`;
+  const crashRecoveryTabId = await client.evaluate(
+    `window.chromaBrowser.command('tab:create', { url: ${JSON.stringify(crashRecoveryUrl)} })`
+  );
+  const crashRecoveryBefore = await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    const tab = candidate.tabs.find(item => item.id === crashRecoveryTabId);
+    return tab && !tab.loading && tab.url === crashRecoveryUrl
+      ? candidate
+      : false;
+  });
+  const crashRequested = await client.evaluate(
+    `window.chromaBrowser.getSmokeViewports({ forceCrashTabId: ${JSON.stringify(crashRecoveryTabId)} })`
+  );
+  assert.equal(crashRequested, true);
+  const crashedPane = await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    const tab = candidate.tabs.find(item => item.id === crashRecoveryTabId);
+    const viewport = (
+      await client.evaluate("window.chromaBrowser.getSmokeViewports()")
+    )[crashRecoveryTabId];
+    const ui = await client.evaluate(`(() => {
+      const card = document.querySelector('.pane-crash-card[data-tab-id=${JSON.stringify(crashRecoveryTabId)}]');
+      return {
+        visible: Boolean(card),
+        role: card?.getAttribute('role'),
+        liveStatus: document.querySelector('#pane-crash-status')?.textContent,
+        reload: card?.querySelector('[data-action="recover-tab"]')?.textContent,
+        close: card?.querySelector('[data-action="close-tab"]')?.textContent,
+      };
+    })()`);
+    return tab?.crashed === true &&
+      viewport?.nativeVisible === false &&
+      ui.visible &&
+      ui.role === "region" &&
+      ui.liveStatus?.endsWith(" stopped working.") &&
+      ui.reload === "Reload tab" &&
+      ui.close === "Close"
+      ? { state: candidate, ui }
+      : false;
+  });
+  assert.equal(
+    crashedPane.state.runtime.managedViewCount,
+    crashRecoveryBefore.runtime.managedViewCount
+  );
+  await client.evaluate(
+    `document.querySelector('.pane-crash-card[data-tab-id=${JSON.stringify(crashRecoveryTabId)}] [data-action="recover-tab"]').click()`
+  );
+  const crashRecoveryAfter = await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    const tab = candidate.tabs.find(item => item.id === crashRecoveryTabId);
+    const viewport = (
+      await client.evaluate("window.chromaBrowser.getSmokeViewports()")
+    )[crashRecoveryTabId];
+    const cardVisible = await client.evaluate(
+      `Boolean(document.querySelector('.pane-crash-card[data-tab-id=${JSON.stringify(crashRecoveryTabId)}]'))`
+    );
+    return tab &&
+      !tab.crashed &&
+      !tab.loading &&
+      tab.url === crashRecoveryUrl &&
+      viewport?.nativeVisible === true &&
+      viewport.url === crashRecoveryUrl &&
+      !cardVisible &&
+      candidate.runtime.managedViewCount === crashRecoveryBefore.runtime.managedViewCount &&
+      candidate.runtime.liveWebContentsCount === candidate.runtime.managedViewCount + 2 &&
+      candidate.runtime.liveWebContentsCount === crashRecoveryBefore.runtime.liveWebContentsCount
+      ? candidate
+      : false;
+  }, 15_000);
+  assert.equal(
+    crashRecoveryAfter.runtime.liveWebContentsCount,
+    crashRecoveryBefore.runtime.liveWebContentsCount
+  );
+  const recoveredCrashTarget = await waitFor(async () => {
+    const list = await targets();
+    return list.find(target =>
+      target.type === "page" && target.url === crashRecoveryUrl
+    );
+  });
+  const recoveredCrashClient = new CdpClient(
+    recoveredCrashTarget.webSocketDebuggerUrl
+  );
+  await recoveredCrashClient.open();
+  const recoveredCrashDocument = await recoveredCrashClient.evaluate(`(() => ({
+    title: document.title,
+    heading: document.querySelector('h1')?.textContent,
+    readyState: document.readyState,
+    url: location.href,
+  }))()`);
+  assert.deepEqual(recoveredCrashDocument, {
+    title: "Example Domain",
+    heading: "Example Domain",
+    readyState: "complete",
+    url: crashRecoveryUrl,
+  });
+  await recoveredCrashClient.close();
+  await client.evaluate(
+    `window.chromaBrowser.command('tab:close', { id: ${JSON.stringify(crashRecoveryTabId)} })`
+  );
+  await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    return !candidate.tabs.some(tab => tab.id === crashRecoveryTabId) &&
+      candidate.runtime.managedViewCount === 1;
+  });
+
   const newTabTarget = await waitFor(async () => {
     const list = await targets();
     return list.find(target => target.url === "chroma://newtab/");
@@ -3077,6 +3428,134 @@ try {
       !candidate.tabs.some(tab => tab.id === folderDragTabId) &&
       !candidate.tabs.some(tab => tab.id === pinnedFolderGuardId) &&
       !candidate.tabs.some(tab => tab.id === essentialFolderGuardId);
+  });
+
+  const workspaceMoveTabId = await client.evaluate(
+    `window.chromaBrowser.command('tab:create', { url: ${JSON.stringify(`${baseUrl}/page-b`)} })`
+  );
+  await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    const rowPresent = await client.evaluate(
+      `Boolean(document.querySelector('.tab-row[data-tab-id=${JSON.stringify(workspaceMoveTabId)}]'))`
+    );
+    const tab = candidate.tabs.find(item => item.id === workspaceMoveTabId);
+    return tab?.workspaceId === folderWorkspaceId && !tab.loading && rowPresent;
+  });
+  await client.evaluate(`(() => {
+    const row = document.querySelector('.tab-row[data-tab-id=${JSON.stringify(workspaceMoveTabId)}]');
+    row.dispatchEvent(new MouseEvent('contextmenu', {
+      bubbles: true,
+      cancelable: true,
+      clientX: row.getBoundingClientRect().right - 8,
+      clientY: row.getBoundingClientRect().top + 8,
+    }));
+  })()`);
+  await waitFor(() => client.evaluate(
+    `Boolean(document.querySelector('[data-action="context-move-workspace"][data-workspace-id=${JSON.stringify(initial.activeWorkspaceId)}]'))`
+  ));
+  await client.evaluate(
+    `document.querySelector('[data-action="context-move-workspace"][data-workspace-id=${JSON.stringify(initial.activeWorkspaceId)}]').click()`
+  );
+  await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    const tab = candidate.tabs.find(item => item.id === workspaceMoveTabId);
+    return tab?.workspaceId === initial.activeWorkspaceId &&
+      candidate.activeWorkspaceId === initial.activeWorkspaceId &&
+      candidate.activeTabId === workspaceMoveTabId;
+  });
+
+  assert.equal(
+    await client.evaluate(`(() => {
+      const source = document.querySelector('.workspace-dot[data-workspace-id=${JSON.stringify(folderWorkspaceId)}]');
+      const target = document.querySelector('.workspace-dot[data-workspace-id=${JSON.stringify(initial.activeWorkspaceId)}]');
+      if (!source || !target) return false;
+      const transfer = new DataTransfer();
+      source.dispatchEvent(new DragEvent('dragstart', { bubbles: true, cancelable: true, dataTransfer: transfer }));
+      const bounds = target.getBoundingClientRect();
+      target.dispatchEvent(new DragEvent('dragover', {
+        bubbles: true,
+        cancelable: true,
+        clientX: bounds.left + 1,
+        clientY: bounds.top + bounds.height / 2,
+        dataTransfer: transfer,
+      }));
+      target.dispatchEvent(new DragEvent('drop', {
+        bubbles: true,
+        cancelable: true,
+        clientX: bounds.left + 1,
+        clientY: bounds.top + bounds.height / 2,
+        dataTransfer: transfer,
+      }));
+      source.dispatchEvent(new DragEvent('dragend', { bubbles: true, dataTransfer: transfer }));
+      return true;
+    })()`),
+    true
+  );
+  await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    return candidate.workspaces[0]?.id === folderWorkspaceId &&
+      candidate.workspaces[1]?.id === initial.activeWorkspaceId;
+  });
+
+  await client.evaluate(
+    `document.querySelector('.workspace-dot[data-workspace-id=${JSON.stringify(folderWorkspaceId)}]').click()`
+  );
+  await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    return candidate.activeWorkspaceId === folderWorkspaceId;
+  });
+  const workspaceDeleteBefore = await client.evaluate(
+    "window.chromaBrowser.getState()"
+  );
+  await client.evaluate(
+    "document.querySelector('[data-action=\"workspace-menu\"]').click()"
+  );
+  await waitFor(() => client.evaluate(
+    "Boolean(document.querySelector('[data-action=\"delete-workspace\"]:not([disabled])'))"
+  ));
+  await client.evaluate(
+    "document.querySelector('[data-action=\"delete-workspace\"]').click()"
+  );
+  const workspaceDeletePrompt = await waitFor(async () => {
+    const ui = await client.evaluate(`(() => ({
+      open: document.querySelector('#text-prompt').open,
+      title: document.querySelector('#text-prompt-title').textContent,
+      message: document.querySelector('#text-prompt-description').textContent,
+      submit: document.querySelector('#text-prompt-submit').textContent,
+    }))()`);
+    return ui.open ? ui : false;
+  });
+  assert.equal(workspaceDeletePrompt.title, "Delete space?");
+  assert.match(workspaceDeletePrompt.message, /will close its 1 tab/i);
+  assert.equal(workspaceDeletePrompt.submit, "Delete space");
+  await client.evaluate(
+    "document.querySelector('#text-prompt-form').requestSubmit()"
+  );
+  await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    return !candidate.runtime.chromeModalOpen &&
+      !candidate.workspaces.some(workspace => workspace.id === folderWorkspaceId) &&
+      !candidate.tabs.some(tab => tab.workspaceId === folderWorkspaceId) &&
+      candidate.activeWorkspaceId === initial.activeWorkspaceId &&
+      candidate.runtime.managedViewCount === workspaceDeleteBefore.runtime.managedViewCount - 1;
+  });
+  await waitFor(async () => {
+    try {
+      const persisted = JSON.parse(await readFile(stateFile, "utf8"));
+      return !persisted.workspaces?.some(workspace => workspace.id === folderWorkspaceId) &&
+        !persisted.tabs?.some(tab => tab.workspaceId === folderWorkspaceId);
+    } catch (error) {
+      if (error?.code === "ENOENT" || error instanceof SyntaxError) return false;
+      throw error;
+    }
+  });
+  await client.evaluate(
+    `window.chromaBrowser.command('tab:close', { id: ${JSON.stringify(workspaceMoveTabId)} })`
+  );
+  await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    return !candidate.tabs.some(tab => tab.id === workspaceMoveTabId) &&
+      candidate.activeWorkspaceId === initial.activeWorkspaceId;
   });
 
   const beforeSnap = await client.evaluate("window.chromaBrowser.getState()");
@@ -4012,6 +4491,9 @@ try {
     brokenPipeLogging: true,
     bridge: true,
     commandPalette: true,
+    shortcutShellInput: true,
+    shortcutPageInput: true,
+    shortcutExactModifiers: true,
     bookmarkUi: true,
     bookmarkPersistence: true,
     pinnedTabUi: true,
@@ -4039,10 +4521,14 @@ try {
     splitPostPreviewTopology: true,
     stateRestoreModel: true,
     contentSandbox: true,
+    crashRecovery: true,
     viewCleanup: true,
     cleanWindowClose: true,
     newTabSearch: true,
     workspaceUi: true,
+    workspaceDeleteUi: true,
+    workspaceReorderUi: true,
+    workspaceMoveTabUi: true,
     folderUi: true,
     folderEmptyDrop: true,
     folderRename: true,
@@ -4101,27 +4587,36 @@ try {
   process.stderr.write(`${output.join("")}\n${error.stack}\n`);
   process.exitCode = 1;
 } finally {
-  if (child && child.exitCode === null) {
-    child.kill("SIGTERM");
-    await Promise.race([once(child, "exit"), delay(1_500)]);
-  }
-  if (testServer?.listening) {
-    testServer.closeAllConnections();
-    await new Promise(resolve => testServer.close(resolve));
-  }
-  if (child && child.exitCode === null) {
-    child.kill("SIGKILL");
-    await Promise.race([once(child, "exit"), delay(1_500)]);
-  }
-  await waitFor(async () => {
+  const cleanupFailures = [];
+  const cleanupStep = async (label, callback) => {
     try {
-      await rm(userData, { recursive: true, force: true });
-      return true;
+      await callback();
     } catch (error) {
-      if (error?.code === "ENOTEMPTY" || error?.code === "EBUSY") return false;
-      throw error;
+      cleanupFailures.push({ label, error });
     }
-  }, 3_000);
+  };
+  await cleanupStep("DevTools connections", closeAllCdpClients);
+  await cleanupStep("Electron process", () => terminateChild(child));
+  await cleanupStep("test server", () => closeTestServer(testServer));
+  await cleanupStep("temporary profile", () => withTimeout(
+    waitFor(async () => {
+      try {
+        await rm(userData, { recursive: true, force: true });
+        return true;
+      } catch (error) {
+        if (error?.code === "ENOTEMPTY" || error?.code === "EBUSY") return false;
+        throw error;
+      }
+    }, 3_000),
+    4_000,
+    "temporary profile removal"
+  ));
+  if (cleanupFailures.length > 0) {
+    process.stderr.write(`Runtime smoke cleanup failed:\n${cleanupFailures
+      .map(({ label, error }) => `- ${label}: ${error?.stack || error}`)
+      .join("\n")}\n`);
+    process.exitCode = 1;
+  }
 }
 
 if (report) {

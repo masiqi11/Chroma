@@ -24,10 +24,11 @@
     "visual:update": "node scripts/visual-smoke.mjs --update",
     "session-smoke": "node scripts/session-smoke.mjs",
     "window-lifecycle-smoke": "node scripts/window-lifecycle-smoke.mjs",
+    "performance": "node scripts/performance-smoke.mjs",
     "package:dir": "CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac --dir",
     "package:mac": "CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac dmg zip",
     "package-smoke": "npm run package:dir && node scripts/package-smoke.mjs",
-    "verify": "npm run check && npm run window-lifecycle-smoke && npm run session-smoke && npm run smoke"
+    "verify": "npm run check && npm run window-lifecycle-smoke && npm run session-smoke && npm run smoke && npm run performance"
   },
   "devDependencies": {
     "@electron/asar": "3.4.1",

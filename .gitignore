@@ -6,5 +6,7 @@ coverage/
 browser-state.json
 artifacts/visual/
 artifacts/package/
+!artifacts/performance/
+!artifacts/performance/report.json
 build/icon.iconset/
 tmp/

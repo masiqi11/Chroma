@@ -44,16 +44,47 @@ test("folder lifecycle commands cross the shared allow-listed boundary", async (
   }
 });
 
+test("workspace lifecycle commands cross the shared allow-listed boundary", async () => {
+  const preloadSource = await readFile(
+    new URL("../src/preload/shell-preload.cjs", import.meta.url),
+    "utf8"
+  );
+
+  for (const command of [
+    commands.deleteWorkspace,
+    commands.reorderWorkspace,
+    commands.moveTabToWorkspace,
+  ]) {
+    assert.equal(commandNames.has(command), true);
+    assert.match(preloadSource, new RegExp(`["']${command}["']`));
+  }
+});
+
+test("crashed tabs can recover only through the allow-listed command", async () => {
+  const preloadSource = await readFile(
+    new URL("../src/preload/shell-preload.cjs", import.meta.url),
+    "utf8"
+  );
+  assert.equal(commands.recoverTab, "tab:recover");
+  assert.equal(commandNames.has(commands.recoverTab), true);
+  assert.match(preloadSource, /["']tab:recover["']/);
+});
+
 test("preload bridge exposes shell-owned modal notification channels", async () => {
   const preloadSource = await readFile(
     new URL("../src/preload/shell-preload.cjs", import.meta.url),
     "utf8"
   );
 
-  for (const channel of [channels.openHistory, channels.openCommandPalette]) {
+  for (const channel of [
+    channels.openHistory,
+    channels.openDownloads,
+    channels.openCommandPalette,
+  ]) {
     assert.match(preloadSource, new RegExp(channel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }
   assert.match(preloadSource, /onOpenCommandPalette/);
+  assert.match(preloadSource, /onOpenDownloads/);
   assert.match(preloadSource, /requestOpenCommandPalette/);
 });
 

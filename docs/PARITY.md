@@ -27,8 +27,8 @@ notice work is tracked in
 | compact sidebar overlay | Current | configurable timing, right-edge mode, multi-window coordination, broader visual regression coverage |
 | appearance / Space color | Current | automatic OS Reduce Transparency integration, per-window themes, presets, and cross-platform native-material/visual QA |
 | navigation / address-search | Basic | provider settings, Chromium Omnibox providers, complete command/action model, certificate/security UI |
-| tab lifecycle | Current | discard policy, cross-window moves, crash recovery UI, direct Chromium `TabStripModel` integration if pursued |
-| workspaces | Basic | gestures, bookmark/container relationships, cross-window propagation, richer management UI |
+| tab lifecycle | Current | discard policy, cross-window moves, crash reporting/telemetry, direct Chromium `TabStripModel` integration if pursued |
+| workspaces | Basic | create/switch/delete, drag reorder, and eligible-tab moves are implemented; bookmark/container relationships, keyboard reordering, cross-window propagation, and richer management UI remain |
 | Essentials | Basic | reset/unload semantics, richer metadata, workspace/global policy |
 | folders | Basic | nesting, search, bulk lifecycle actions, convert-to-workspace behavior |
 | live folders | Planned | provider model, background refresh, privacy and rate-limit policy |
@@ -40,12 +40,14 @@ notice work is tracked in
 | permissions / site information | Basic | persistent Chromium PermissionManager policy, certificate, site-data, device, and extension panels |
 | local history | Current | replace the local JSON service with production Chromium `HistoryService` integration; add profile/sync policy and richer favicon/settings surfaces |
 | bookmarks | Basic | local star/unstar, sidebar listing, open/remove, and profile persistence are implemented; folders, richer management, address-bar integration, and import/export remain |
-| command palette | Current | `Cmd/Ctrl+Shift+P`, CJK/English ranked search, contextual availability, keyboard navigation, and safe action adapters are wired; user-defined commands and extension actions remain |
+| command palette | Current | a visible shell control, CJK/English ranked search, contextual availability, keyboard navigation, and safe action adapters are wired; a user-configurable shortcut, user-defined commands, and extension actions remain |
+| browser shortcuts | Current | one exact-match registry routes shell/page/overlay input and supplies platform menu/palette labels; remapping, shortcut settings/conflict UI, catalog-action alignment, Zen grid/numeric-Space chords, AltGr/platform normalization, private-window behavior, and full native-platform acceptance remain |
 | passwords / autofill / WebAuthn | Planned | integrate mature Chromium services and native security UI; do not implement secrets in shell JavaScript |
 | Chrome extensions | Planned | direct extension-system host, action popup, MV3 worker, tabs/storage/DNR/native-messaging coverage |
 | containers / isolated identities | Planned | storage-partition model that preserves explicitly shared services |
-| session restoration | Basic | multi-window restore and reconciliation, crash-recovery UX, production Chromium session services |
+| session restoration | Basic | multi-window restore and reconciliation, dirty-session recovery UX, production Chromium session services |
 | state repair / host lifecycle | Current | broader corruption fuzzing, multi-window ownership, and crash-reporting integration |
+| startup / memory regression gate | Current | one/eight-tab local-fixture startup and RSS ceilings are automated on macOS/Linux; Windows sampling, GPU/native-material cost, long-session leaks, interaction latency, CPU, and energy remain |
 | cloud sync | Planned | identity, service, encryption, conflict model, and explicit synced datatypes |
 | page customization / mods | Policy/License | define an original Chroma API and security boundary; Firefox/XUL mods are not portable |
 | local unsigned macOS package | Current | explicit runtime allow-list, original Chroma icon, five license resources, and packaged-executable smoke; cross-platform package QA remains |
@@ -93,6 +95,26 @@ release checklist remain open in [`../TESTING.md`](../TESTING.md).
   desktop/mobile override.
 - Tabs can be dragged into a basic folder and back to the ungrouped area. The
   target folder expands after a successful move.
+- Space controls use roving keyboard focus with Arrow/Home/End switching and
+  can be reordered by drag/drop. An ordinary ungrouped, unpinned,
+  non-Essential, unsplit tab can move to another Space from its context menu.
+  Confirmed deletion removes one Space and all of its owned tabs, folders, and
+  splits, chooses a deterministic adjacent fallback, and cannot remove the
+  final Space.
+- When a page renderer exits, only its native pane is hidden; healthy split
+  siblings remain visible. The shell shows an accessible Reload/Close card.
+  Reload either reuses the surviving `WebContents` or creates a replacement
+  while preserving the tab ID, URL, and workspace/folder/split topology.
+- Browser chords are matched against an exact shared registry before the page
+  receives them. Primary means Command on macOS and Control elsewhere, while
+  literal Control remains distinct for Ctrl+Tab on macOS. The registry covers
+  navigation, tabs, workspaces, splits, zoom, bookmarks, history, downloads,
+  sidebar, and developer tools. Extra modifiers, repeats, composition, and
+  key-up events do not fall through to a different action. The command palette
+  uses its visible Commands control; `Cmd/Ctrl+Shift+P` is intentionally
+  unbound. An exact browser chord is consumed even when its action is currently
+  unavailable, and shell/page/overlay paths guard destroyed native views.
+  AltGr normalization still needs real Windows/Linux acceptance.
 - Appearance offers persisted `System`, `Light`, and `Dark` themes, the active
   Space's six-digit accent color, and a manual Reduce transparency option.
   System follows Electron's native theme. Reduced mode swaps Chroma's glass
@@ -131,17 +153,21 @@ Verification combines pure geometry/model tests with the isolated Electron
 runtime smoke test. It covers zero-width collapse, overlay width and z-order,
 unchanged page visibility, neutral frames, merge/order/detach transitions,
 live divider preview versus one durable ratio commit, active and compact capsule
-geometry, folder drag behavior, responsive pane bounds, navigation rollback,
-sandbox isolation, and native-view cleanup.
+geometry, folder drag behavior, workspace reorder/delete/tab movement,
+shell/page shortcut routing, crashed-pane recovery, responsive pane bounds,
+navigation rollback, sandbox isolation, and native-view cleanup.
 
 The implemented history contract is recorded in
-[`docs/HISTORY-SPEC.md`](HISTORY-SPEC.md). Runtime smoke reports explicit
+[`HISTORY-SPEC.md`](HISTORY-SPEC.md). Runtime smoke reports explicit
 `historyPanel`, `historySearch`, `historyDelete`, `historyClearRange`,
 `historyPersistence`, and `historyPrivacyPolicy` checks, alongside
 `downloadUi`, `downloadLifecycle`, `downloadPersistence`, `splitRatioDrag`,
 `splitRatioPersistence`, `appearanceUi`, `appearanceRuntime`,
 `appearancePersistence`, command-palette, local-bookmark, and
-broken-output-pipe coverage. A separate four-launch session smoke verifies that
+broken-output-pipe coverage. It also reports `shortcutShellInput`,
+`shortcutPageInput`, `shortcutExactModifiers`, `workspaceDeleteUi`,
+`workspaceReorderUi`, `workspaceMoveTabUi`, and `crashRecovery`. A separate
+four-launch session smoke verifies that
 workspaces, tabs, folders, split groups, sidebar state, an external startup URL,
 and dark/light/system Appearance settings survive restart boundaries.
 
@@ -154,10 +180,18 @@ npm run package-smoke
 ```
 
 `verify` serially runs the fast `check` gate, the concurrent-window lifecycle
-smoke, the four-launch session-restoration smoke, and the full Electron runtime
-smoke. `npm run check` by itself performs syntax validation and Node
-unit/source-contract tests only; it does not launch Electron and therefore does
-not establish that the browser UI starts or remains crash-free.
+smoke, the four-launch session-restoration smoke, the full Electron runtime
+smoke, and the local-fixture performance gate. `npm run check` by itself
+performs syntax validation and Node unit/source-contract tests only; it does not
+launch Electron and therefore does not establish that the browser UI starts or
+remains crash-free.
+
+The performance stage gates shell/first-page readiness and one/eight-tab
+process-tree RSS against conservative ceilings, then writes
+`artifacts/performance/report.json`. It uses software rendering and tiny local
+fixtures, so it is not evidence about real-site, GPU, long-session, Windows,
+CPU, energy, or cross-browser performance. See
+[`PERFORMANCE.md`](PERFORMANCE.md) for the exact method and current result.
 
 `package-smoke` is an independent local macOS bundle gate. It produces an
 unsigned `.app`, verifies that its ASAR contains only the declared runtime
@@ -178,7 +212,7 @@ three-pane, and 2×2 four-pane layouts. Current baselines cover Darwin/Electron
 43 only and deliberately exclude GPU/native vibrancy, Mica, operating-system
 shadows, and cross-platform window chrome.
 The exact self-regression evidence is listed in
-[`../UI_COMPARISON.md`](../UI_COMPARISON.md); zero diff does not measure
+[`../UI_COMPARISON.md`](../UI_COMPARISON.md); a passing self-regression diff does not measure
 similarity to Arc or Zen.
 
 The split-ratio core, download service, command-search core, and Appearance

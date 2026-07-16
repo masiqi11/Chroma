@@ -29,6 +29,14 @@ import {
   normalizeNavigationInput,
 } from "../shared/navigation.mjs";
 import {
+  decrementPageZoom,
+  incrementPageZoom,
+  pageZoomFactorToPercent,
+  pageZoomPercentToFactor,
+  resetPageZoom,
+} from "../shared/page-zoom.mjs";
+import { shortcutActionForInput } from "../shared/shortcut-registry.mjs";
+import {
   TAB_COUNT_LIMIT,
   TAB_URL_MAX_LENGTH,
   normalizeTabFavicon,
@@ -141,10 +149,6 @@ function normalizeCommittedPageUrl(value) {
   return isSafePageUrl(value) ? normalizeRuntimePageUrl(value) : null;
 }
 
-function activeModifier(input) {
-  return process.platform === "darwin" ? input.meta : input.control;
-}
-
 function validId(value) {
   return typeof value === "string" && value.length > 0 && value.length < 200;
 }
@@ -223,6 +227,8 @@ export class BrowserController {
   #commandQueue = Promise.resolve();
   #destroyPromise = null;
   #destroying = false;
+  #destroyingViewIds = new Set();
+  #shellShortcutHandlers = new Map();
 
   constructor(
     browserWindow,
@@ -264,6 +270,7 @@ export class BrowserController {
 
   async initialize() {
     this.#applyAppearance({ ...this.#state.settings.appearance });
+    this.#wireShellShortcuts(this.#window.webContents);
     const { prunedCount } = this.#historyService.prune();
     if (prunedCount) this.#store.scheduleSave(this.#state);
     for (const tab of this.#state.tabs) {
@@ -299,12 +306,10 @@ export class BrowserController {
         chromeModalOpen: this.#chromeModalOpen,
         tabDragActive: this.#tabDragActive,
         sidebarOverlayOpen: this.#sidebarOverlayOpen,
-        sidebarOverlayVisible: Boolean(this.#sidebarOverlayView?.getVisible()),
+        sidebarOverlayVisible: this.#safeViewVisible(this.#sidebarOverlayView),
         sidebarOverlayReady: this.#sidebarOverlayReady,
         canReopenTab: this.#closedTabs.length > 0,
-        sidebarOverlayBounds: this.#sidebarOverlayView
-          ? this.#sidebarOverlayView.getBounds()
-          : null,
+        sidebarOverlayBounds: this.#safeViewBounds(this.#sidebarOverlayView),
         ...(process.env.CHROMA_HEADLESS_SMOKE === "1"
           ? {
               windowBounds: this.#window.getBounds(),
@@ -312,7 +317,10 @@ export class BrowserController {
                 ? { ...this.#contentBounds }
                 : null,
               viewBounds: Object.fromEntries(
-                [...this.#views].map(([id, view]) => [id, view.getBounds()])
+                [...this.#views].map(([id, view]) => [
+                  id,
+                  this.#safeViewBounds(view),
+                ])
               ),
             }
           : {}),
@@ -320,14 +328,44 @@ export class BrowserController {
     };
   }
 
-  async getSmokeViewports() {
+  async getSmokeViewports(options = {}) {
     if (process.env.CHROMA_HEADLESS_SMOKE !== "1") {
       throw new Error("Viewport diagnostics are only available during smoke tests");
     }
+    const forceCrashTabId = validId(options?.forceCrashTabId)
+      ? options.forceCrashTabId
+      : null;
+    if (forceCrashTabId) {
+      const contents = this.#safeViewContents(this.#viewFor(forceCrashTabId));
+      if (!contents) return false;
+      try {
+        contents.forcefullyCrashRenderer();
+        return true;
+      } catch {
+        return false;
+      }
+    }
     const entries = await Promise.all(
       [...this.#views].map(async ([id, view]) => {
-        const bounds = view.getBounds();
-        const contents = view.webContents;
+        const bounds = this.#safeViewBounds(view);
+        const contents = this.#safeViewContents(view, { allowDestroyed: true });
+        const tab = this.#tab(id);
+        if (!contents) return [id, { bounds, unavailable: true, destroyed: true }];
+        if (tab?.crashed) {
+          let destroyed = true;
+          try {
+            destroyed = contents.isDestroyed();
+          } catch {
+            // Treat an inaccessible wrapper as destroyed diagnostics.
+          }
+          return [id, {
+            bounds,
+            nativeVisible: this.#safeViewVisible(view),
+            url: tab.url,
+            crashed: true,
+            destroyed,
+          }];
+        }
         if (contents.isDestroyed()) return [id, { bounds, destroyed: true }];
         try {
           const viewport = await contents.executeJavaScript(`({
@@ -354,7 +392,7 @@ export class BrowserController {
           })`);
           return [id, {
             bounds,
-            nativeVisible: view.getVisible(),
+            nativeVisible: this.#safeViewVisible(view),
             url: contents.getURL(),
             adaptiveMode: this.#adaptiveViews.get(id)?.mode || "desktop",
             adaptivePendingMode: this.#adaptiveViews.get(id)?.pending?.mode || null,
@@ -363,7 +401,13 @@ export class BrowserController {
             destroyed: false,
           }];
         } catch {
-          return [id, { bounds, unavailable: true, destroyed: contents.isDestroyed() }];
+          let destroyed = true;
+          try {
+            destroyed = contents.isDestroyed();
+          } catch {
+            // Treat an inaccessible wrapper as destroyed diagnostics.
+          }
+          return [id, { bounds, unavailable: true, destroyed }];
         }
       })
     );
@@ -403,6 +447,8 @@ export class BrowserController {
         return this.selectTab(payload.id);
       case commands.closeTab:
         return this.closeTab(payload.id);
+      case commands.recoverTab:
+        return this.recoverTab(payload.id);
       case commands.reopenTab:
         return this.reopenClosedTab();
       case commands.reorderTab:
@@ -412,6 +458,12 @@ export class BrowserController {
           payload.position,
           Object.hasOwn(payload, "folderId") ? payload.folderId : undefined
         );
+      case commands.moveTabToWorkspace:
+        return this.moveTabToWorkspace(payload.id, payload.workspaceId);
+      case commands.selectNextTab:
+        return this.selectAdjacentTab(1);
+      case commands.selectPreviousTab:
+        return this.selectAdjacentTab(-1);
       case commands.navigate:
         return this.navigate(payload.id, payload.input);
       case commands.back:
@@ -420,6 +472,8 @@ export class BrowserController {
         return this.goForward(payload.id);
       case commands.reload:
         return this.reload(payload.id);
+      case commands.reloadIgnoringCache:
+        return this.reloadIgnoringCache(payload.id);
       case commands.stop:
         return this.stop(payload.id);
       case commands.toggleMute:
@@ -464,6 +518,18 @@ export class BrowserController {
         return this.selectWorkspace(payload.id);
       case commands.renameWorkspace:
         return this.renameWorkspace(payload.id, payload.name);
+      case commands.deleteWorkspace:
+        return this.deleteWorkspace(payload.id);
+      case commands.reorderWorkspace:
+        return this.reorderWorkspace(
+          payload.id,
+          payload.targetId,
+          payload.position
+        );
+      case commands.selectNextWorkspace:
+        return this.selectAdjacentWorkspace(1);
+      case commands.selectPreviousWorkspace:
+        return this.selectAdjacentWorkspace(-1);
       case commands.splitActive:
         return this.splitActive(payload.direction);
       case commands.splitTabs:
@@ -499,6 +565,14 @@ export class BrowserController {
         return this.setSidebarWidth(payload.width);
       case commands.setAppearance:
         return this.setAppearance(payload);
+      case commands.zoomIn:
+        return this.changePageZoom(payload.id, "in");
+      case commands.zoomOut:
+        return this.changePageZoom(payload.id, "out");
+      case commands.zoomReset:
+        return this.changePageZoom(payload.id, "reset");
+      case commands.openDownloads:
+        return this.openDownloads();
       case commands.openDevTools:
         return this.openDevTools(payload.id);
       default:
@@ -660,18 +734,16 @@ export class BrowserController {
     return true;
   }
 
-  async createTab({
+  #createTabRecord({
     url = "chroma://newtab/",
     workspaceId = this.#state.activeWorkspaceId,
-    activate = true,
     essential = false,
     pinned = false,
   } = {}) {
-    if (this.#state.tabs.length >= TAB_COUNT_LIMIT) return null;
     const workspace = this.#workspace(workspaceId) || this.#activeWorkspace();
     const normalizedUrl = normalizeRequestedPageUrl(url);
     const isEssential = Boolean(essential);
-    const tab = {
+    return {
       id: randomUUID(),
       workspaceId: workspace.id,
       url: normalizedUrl,
@@ -687,6 +759,23 @@ export class BrowserController {
       canGoForward: false,
       lastActiveAt: Date.now(),
     };
+  }
+
+  async createTab({
+    url = "chroma://newtab/",
+    workspaceId = this.#state.activeWorkspaceId,
+    activate = true,
+    essential = false,
+    pinned = false,
+  } = {}) {
+    if (this.#state.tabs.length >= TAB_COUNT_LIMIT) return null;
+    const tab = this.#createTabRecord({
+      url,
+      workspaceId,
+      essential,
+      pinned,
+    });
+    const workspace = this.#workspace(tab.workspaceId) || this.#activeWorkspace();
     this.#state.tabs.push(tab);
     this.#createView(tab);
     if (activate) {
@@ -707,6 +796,15 @@ export class BrowserController {
     this.#commit();
     this.#focusTab(tab.id);
     return true;
+  }
+
+  selectAdjacentTab(delta) {
+    if (delta !== 1 && delta !== -1) return false;
+    const tabs = this.#tabsForWorkspace(this.#state.activeWorkspaceId);
+    if (tabs.length < 2) return false;
+    const currentIndex = tabs.findIndex(tab => tab.id === this.#state.activeTabId);
+    const nextIndex = (Math.max(0, currentIndex) + delta + tabs.length) % tabs.length;
+    return this.selectTab(tabs[nextIndex].id);
   }
 
   async closeTab(id = this.#state.activeTabId) {
@@ -780,6 +878,38 @@ export class BrowserController {
       essential: snapshot.essential,
       pinned: snapshot.pinned,
     });
+  }
+
+  async recoverTab(id = this.#state.activeTabId) {
+    const tab = this.#tab(id);
+    const currentView = this.#viewFor(id);
+    if (!tab?.crashed || !currentView) return false;
+
+    const contents = this.#safeViewContents(currentView);
+    if (contents) {
+      try {
+        tab.crashed = false;
+        tab.loading = true;
+        this.#historyNextTransitions.set(id, "reload");
+        this.#cancelAdaptiveProbe(id, true);
+        contents.reload();
+        this.#commit();
+        this.#focusTab(id);
+        return true;
+      } catch {
+        // A WebContents can be destroyed between isDestroyed() and reload().
+        // Fall through to rebuilding the native view while preserving the tab.
+        tab.crashed = true;
+        tab.loading = false;
+      }
+    }
+
+    const destroyed = await this.#destroyView(id);
+    if (!destroyed || this.#destroying || this.#tab(id) !== tab) return false;
+    this.#createView(tab);
+    this.#commit();
+    this.#focusTab(id);
+    return true;
   }
 
   // `folderId` is intentionally tri-state: omitted preserves legacy inference
@@ -919,51 +1049,107 @@ export class BrowserController {
 
   goBack(id = this.#state.activeTabId) {
     const view = this.#viewFor(id);
-    const contents = view?.webContents;
-    if (!contents?.navigationHistory.canGoBack()) return false;
-    this.#historyNextTransitions.set(id, "other");
-    this.#prepareAdaptiveUserNavigation(id, view);
-    contents.navigationHistory.goBack();
-    return true;
+    const contents = this.#safeViewContents(view);
+    if (!contents) return false;
+    try {
+      if (!contents.navigationHistory.canGoBack()) return false;
+      this.#historyNextTransitions.set(id, "other");
+      this.#prepareAdaptiveUserNavigation(id, view);
+      contents.navigationHistory.goBack();
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   goForward(id = this.#state.activeTabId) {
     const view = this.#viewFor(id);
-    const contents = view?.webContents;
-    if (!contents?.navigationHistory.canGoForward()) return false;
-    this.#historyNextTransitions.set(id, "other");
-    this.#prepareAdaptiveUserNavigation(id, view);
-    contents.navigationHistory.goForward();
-    return true;
+    const contents = this.#safeViewContents(view);
+    if (!contents) return false;
+    try {
+      if (!contents.navigationHistory.canGoForward()) return false;
+      this.#historyNextTransitions.set(id, "other");
+      this.#prepareAdaptiveUserNavigation(id, view);
+      contents.navigationHistory.goForward();
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   reload(id = this.#state.activeTabId) {
     const view = this.#viewFor(id);
-    const contents = view?.webContents;
+    const contents = this.#safeViewContents(view);
     if (!contents) return false;
-    this.#historyNextTransitions.set(id, "reload");
-    this.#prepareAdaptiveUserNavigation(id, view);
-    contents.reload();
-    return true;
+    try {
+      this.#historyNextTransitions.set(id, "reload");
+      this.#prepareAdaptiveUserNavigation(id, view);
+      contents.reload();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  reloadIgnoringCache(id = this.#state.activeTabId) {
+    const view = this.#viewFor(id);
+    const contents = this.#safeViewContents(view);
+    if (!contents) return false;
+    try {
+      this.#historyNextTransitions.set(id, "reload");
+      this.#prepareAdaptiveUserNavigation(id, view);
+      contents.reloadIgnoringCache();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  changePageZoom(id = this.#state.activeTabId, direction = "reset") {
+    const contents = this.#safeViewContents(this.#viewFor(id));
+    if (!contents) return false;
+    try {
+      const current = pageZoomFactorToPercent(contents.getZoomFactor());
+      const percent = direction === "in"
+        ? incrementPageZoom(current)
+        : direction === "out"
+          ? decrementPageZoom(current)
+          : direction === "reset"
+            ? resetPageZoom()
+            : null;
+      if (percent === null) return false;
+      contents.setZoomFactor(pageZoomPercentToFactor(percent));
+      return percent;
+    } catch {
+      return false;
+    }
   }
 
   stop(id = this.#state.activeTabId) {
     const view = this.#viewFor(id);
-    const contents = view?.webContents;
+    const contents = this.#safeViewContents(view);
     if (!contents) return false;
-    this.#suppressAdaptiveAfterUserStop(id, view);
-    contents.stop();
-    return true;
+    try {
+      this.#suppressAdaptiveAfterUserStop(id, view);
+      contents.stop();
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   toggleMute(id = this.#state.activeTabId) {
     const tab = this.#tab(id);
-    const contents = this.#viewFor(id)?.webContents;
+    const contents = this.#safeViewContents(this.#viewFor(id));
     if (!tab || !contents) return false;
-    tab.muted = !contents.isAudioMuted();
-    contents.setAudioMuted(tab.muted);
-    this.#commit();
-    return tab.muted;
+    try {
+      tab.muted = !contents.isAudioMuted();
+      contents.setAudioMuted(tab.muted);
+      this.#commit();
+      return tab.muted;
+    } catch {
+      return false;
+    }
   }
 
   togglePin(id = this.#state.activeTabId) {
@@ -1057,7 +1243,21 @@ export class BrowserController {
     ) {
       return false;
     }
+    this.#hideSidebarOverlayForShellSurface();
     this.#window.webContents.send(channels.openHistory);
+    return true;
+  }
+
+  openDownloads() {
+    if (
+      this.#destroying ||
+      this.#window.isDestroyed() ||
+      this.#window.webContents.isDestroyed()
+    ) {
+      return false;
+    }
+    this.#hideSidebarOverlayForShellSurface();
+    this.#window.webContents.send(channels.openDownloads);
     return true;
   }
 
@@ -1096,12 +1296,127 @@ export class BrowserController {
     return true;
   }
 
+  selectAdjacentWorkspace(delta) {
+    if ((delta !== 1 && delta !== -1) || this.#state.workspaces.length < 2) {
+      return false;
+    }
+    const currentIndex = this.#state.workspaces.findIndex(
+      workspace => workspace.id === this.#state.activeWorkspaceId
+    );
+    const nextIndex = (
+      Math.max(0, currentIndex) + delta + this.#state.workspaces.length
+    ) % this.#state.workspaces.length;
+    return this.selectWorkspace(this.#state.workspaces[nextIndex].id);
+  }
+
   renameWorkspace(id, name) {
     const workspace = this.#workspace(id);
     const value = String(name || "").trim();
     if (!workspace || !value) return false;
     workspace.name = value.slice(0, 80);
     this.#commit();
+    return true;
+  }
+
+  async deleteWorkspace(id) {
+    const workspaceIndex = this.#state.workspaces.findIndex(item => item.id === id);
+    if (workspaceIndex < 0 || this.#state.workspaces.length <= 1) return false;
+
+    const removedTabIds = this.#tabsForWorkspace(id).map(tab => tab.id);
+    const removedTabIdSet = new Set(removedTabIds);
+    const removedGroupIds = this.#state.splitGroups
+      .filter(group => group.workspaceId === id)
+      .map(group => group.id);
+    const deletingActive = this.#state.activeWorkspaceId === id ||
+      removedTabIdSet.has(this.#state.activeTabId);
+    const fallbackWorkspace = this.#state.workspaces[workspaceIndex + 1] ||
+      this.#state.workspaces[workspaceIndex - 1];
+    const fallbackTab = deletingActive
+      ? [...this.#tabsForWorkspace(fallbackWorkspace.id)].sort(
+          (left, right) => right.lastActiveAt - left.lastActiveAt
+        )[0]
+      : null;
+    if (deletingActive && !fallbackTab) return false;
+
+    this.#state.workspaces.splice(workspaceIndex, 1);
+    this.#state.tabs = this.#state.tabs.filter(tab => tab.workspaceId !== id);
+    this.#state.folders = this.#state.folders.filter(folder => folder.workspaceId !== id);
+    this.#state.splitGroups = this.#state.splitGroups.filter(
+      group => group.workspaceId !== id
+    );
+    for (const groupId of removedGroupIds) this.#splitLayoutPreviews.delete(groupId);
+    this.#closedTabs = this.#closedTabs.filter(snapshot => snapshot.workspaceId !== id);
+
+    if (deletingActive) {
+      this.#state.activeWorkspaceId = fallbackWorkspace.id;
+      this.#state.activeTabId = fallbackTab.id;
+      fallbackTab.lastActiveAt = Date.now();
+    }
+
+    this.#commit();
+    if (deletingActive) this.#focusTab(this.#state.activeTabId);
+    await Promise.all(removedTabIds.map(tabId => this.#destroyView(tabId)));
+    this.#notify(false);
+    return true;
+  }
+
+  reorderWorkspace(id, targetId, position = "before") {
+    if (!validId(id) || !validId(targetId) || id === targetId) return false;
+    const fromIndex = this.#state.workspaces.findIndex(item => item.id === id);
+    const targetIndex = this.#state.workspaces.findIndex(item => item.id === targetId);
+    if (fromIndex < 0 || targetIndex < 0) return false;
+    const [workspace] = this.#state.workspaces.splice(fromIndex, 1);
+    const currentTargetIndex = this.#state.workspaces.findIndex(
+      item => item.id === targetId
+    );
+    const insertionIndex = position === "after"
+      ? currentTargetIndex + 1
+      : currentTargetIndex;
+    this.#state.workspaces.splice(insertionIndex, 0, workspace);
+    this.#commit();
+    return true;
+  }
+
+  moveTabToWorkspace(id, workspaceId) {
+    const tab = this.#tab(id);
+    const targetWorkspace = this.#workspace(workspaceId);
+    if (
+      !tab ||
+      !targetWorkspace ||
+      tab.workspaceId === targetWorkspace.id ||
+      tab.essential ||
+      tab.pinned ||
+      this.#splitForTab(tab.id) ||
+      this.#state.folders.some(folder => folder.tabIds.includes(tab.id))
+    ) {
+      return false;
+    }
+
+    const sourceWorkspaceId = tab.workspaceId;
+    const sourceTabs = this.#tabsForWorkspace(sourceWorkspaceId);
+    // Moving the only tab must leave a usable replacement behind. At the
+    // global cap that would create a transient 513th record which the disk
+    // sanitizer would later truncate, silently losing the moved tab.
+    if (sourceTabs.length === 1 && this.#state.tabs.length >= TAB_COUNT_LIMIT) {
+      return false;
+    }
+    const tabIndex = this.#state.tabs.findIndex(item => item.id === tab.id);
+    if (tabIndex < 0) return false;
+    this.#state.tabs.splice(tabIndex, 1);
+
+    if (sourceTabs.length === 1) {
+      const replacement = this.#createTabRecord({ workspaceId: sourceWorkspaceId });
+      this.#state.tabs.splice(tabIndex, 0, replacement);
+      this.#createView(replacement);
+    }
+
+    tab.workspaceId = targetWorkspace.id;
+    tab.lastActiveAt = Date.now();
+    this.#state.tabs.push(tab);
+    const movingActive = this.#state.activeTabId === tab.id;
+    if (movingActive) this.#state.activeWorkspaceId = targetWorkspace.id;
+    this.#commit();
+    if (movingActive) this.#focusTab(tab.id);
     return true;
   }
 
@@ -1452,10 +1767,14 @@ export class BrowserController {
   }
 
   openDevTools(id = this.#state.activeTabId) {
-    const contents = this.#viewFor(id)?.webContents;
+    const contents = this.#safeViewContents(this.#viewFor(id));
     if (!contents) return false;
-    contents.openDevTools({ mode: "detach" });
-    return true;
+    try {
+      contents.openDevTools({ mode: "detach" });
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   destroy() {
@@ -1466,6 +1785,10 @@ export class BrowserController {
     this.#clearSidebarOverlayHideTimer();
     this.#stopSidebarOverlayPointerWatch();
     this.#splitLayoutPreviews.clear();
+    for (const [contents, handler] of this.#shellShortcutHandlers) {
+      if (!contents.isDestroyed()) contents.removeListener("before-input-event", handler);
+    }
+    this.#shellShortcutHandlers.clear();
     for (const id of this.#adaptiveViews.keys()) {
       this.#cancelAdaptiveProbe(id, true);
     }
@@ -1524,6 +1847,7 @@ export class BrowserController {
     this.#sidebarOverlayView = view;
     this.#window.contentView.addChildView(view);
     this.#registerShellWebContents(contents);
+    this.#wireShellShortcuts(contents);
 
     contents.setWindowOpenHandler(() => ({ action: "deny" }));
     contents.on("will-navigate", event => event.preventDefault());
@@ -1587,6 +1911,15 @@ export class BrowserController {
     if (!this.#sidebarOverlayHideTimer) return;
     clearTimeout(this.#sidebarOverlayHideTimer);
     this.#sidebarOverlayHideTimer = null;
+  }
+
+  #hideSidebarOverlayForShellSurface() {
+    if (!this.#sidebarOverlayOpen) return;
+    this.#sidebarOverlayOpen = false;
+    this.#sidebarOverlayKeepOpen = false;
+    this.#sidebarOverlayFocusAddressPending = false;
+    this.#syncSidebarOverlay();
+    this.#notify(false);
   }
 
   #stopSidebarOverlayPointerWatch() {
@@ -1672,91 +2005,119 @@ export class BrowserController {
   }
 
   #focusSidebarOverlayAddress() {
-    const contents = this.#sidebarOverlayView?.webContents;
+    const contents = this.#safeViewContents(this.#sidebarOverlayView);
     if (
       !this.#sidebarOverlayFocusAddressPending ||
       !this.#sidebarOverlayReady ||
-      !contents ||
-      contents.isDestroyed()
+      !contents
     ) {
       return;
     }
     this.#sidebarOverlayFocusAddressPending = false;
-    contents.focus();
-    contents.send("chroma:focus-address");
+    try {
+      contents.focus();
+      contents.send("chroma:focus-address");
+    } catch {
+      this.#sidebarOverlayReady = false;
+      this.#sidebarOverlayOpen = false;
+    }
   }
 
   #syncSidebarOverlay() {
     const view = this.#sidebarOverlayView;
     if (!view || this.#destroying || this.#window.isDestroyed()) return;
-    const shouldShow = this.#state.settings.sidebarCollapsed && this.#sidebarOverlayOpen;
-    const desiredBounds = this.#tabDragActive
-      ? {
-          x: 0,
-          y: 0,
-          width: Math.max(1, this.#window.getContentBounds().width),
-          height: Math.max(1, this.#window.getContentBounds().height),
-        }
-      : this.#sidebarOverlayBounds || this.#defaultSidebarOverlayBounds();
-
-    if (!shouldShow) {
+    if (!this.#safeViewContents(view, { allowDestroyed: true })) {
       this.#stopSidebarOverlayPointerWatch();
-      this.#sidebarOverlayFocusAddressPending = false;
-      this.#sidebarOverlayKeepOpen = false;
-      if (!view.getVisible()) {
-        view.setBounds(desiredBounds);
-        return;
-      }
-      this.#clearSidebarOverlayHideTimer();
-      if (!this.#state.settings.sidebarCollapsed || this.#tabDragActive) {
-        view.setVisible(false);
-        view.setBounds(desiredBounds);
-        return;
-      }
-      const offscreenBounds = this.#sidebarOverlayOffscreenBounds(desiredBounds);
-      if (process.env.CHROMA_HEADLESS_SMOKE === "1") {
-        view.setBounds(offscreenBounds);
-        view.setVisible(false);
-        return;
-      }
-      view.setBounds(offscreenBounds, {
-        animate: { duration: SIDEBAR_OVERLAY_ANIMATION_MS },
-      });
-      this.#sidebarOverlayHideTimer = setTimeout(() => {
-        this.#sidebarOverlayHideTimer = null;
-        if (
-          !this.#sidebarOverlayOpen &&
-          this.#sidebarOverlayView === view &&
-          !this.#destroying
-        ) {
-          view.setVisible(false);
-        }
-      }, SIDEBAR_OVERLAY_ANIMATION_MS + 30);
+      this.#sidebarOverlayView = null;
+      this.#sidebarOverlayReady = false;
+      this.#sidebarOverlayOpen = false;
       return;
     }
+    try {
+      const shouldShow = this.#state.settings.sidebarCollapsed && this.#sidebarOverlayOpen;
+      const desiredBounds = this.#tabDragActive
+        ? {
+            x: 0,
+            y: 0,
+            width: Math.max(1, this.#window.getContentBounds().width),
+            height: Math.max(1, this.#window.getContentBounds().height),
+          }
+        : this.#sidebarOverlayBounds || this.#defaultSidebarOverlayBounds();
 
-    this.#clearSidebarOverlayHideTimer();
-    this.#startSidebarOverlayPointerWatch();
-    const wasVisible = view.getVisible();
-    if (!wasVisible && !this.#tabDragActive) {
-      view.setBounds(this.#sidebarOverlayOffscreenBounds(desiredBounds));
-    }
-    view.setVisible(true);
-    // Re-adding an existing child View is Electron's supported way to make it
-    // topmost, which keeps the floating sidebar above every page view.
-    this.#window.contentView.addChildView(view);
-    if (!wasVisible && process.env.CHROMA_HEADLESS_SMOKE !== "1") {
-      queueMicrotask(() => {
-        if (this.#sidebarOverlayOpen && this.#sidebarOverlayView === view) {
-          view.setBounds(desiredBounds, {
-            animate: { duration: SIDEBAR_OVERLAY_ANIMATION_MS },
-          });
-          this.#focusSidebarOverlayAddress();
+      if (!shouldShow) {
+        this.#stopSidebarOverlayPointerWatch();
+        this.#sidebarOverlayFocusAddressPending = false;
+        this.#sidebarOverlayKeepOpen = false;
+        if (!view.getVisible()) {
+          view.setBounds(desiredBounds);
+          return;
         }
-      });
-    } else {
-      view.setBounds(desiredBounds);
-      this.#focusSidebarOverlayAddress();
+        this.#clearSidebarOverlayHideTimer();
+        if (!this.#state.settings.sidebarCollapsed || this.#tabDragActive) {
+          view.setVisible(false);
+          view.setBounds(desiredBounds);
+          return;
+        }
+        const offscreenBounds = this.#sidebarOverlayOffscreenBounds(desiredBounds);
+        if (process.env.CHROMA_HEADLESS_SMOKE === "1") {
+          view.setBounds(offscreenBounds);
+          view.setVisible(false);
+          return;
+        }
+        view.setBounds(offscreenBounds, {
+          animate: { duration: SIDEBAR_OVERLAY_ANIMATION_MS },
+        });
+        this.#sidebarOverlayHideTimer = setTimeout(() => {
+          this.#sidebarOverlayHideTimer = null;
+          if (
+            !this.#sidebarOverlayOpen &&
+            this.#sidebarOverlayView === view &&
+            !this.#destroying
+          ) {
+            try {
+              view.setVisible(false);
+            } catch {
+              this.#syncSidebarOverlay();
+            }
+          }
+        }, SIDEBAR_OVERLAY_ANIMATION_MS + 30);
+        return;
+      }
+
+      this.#clearSidebarOverlayHideTimer();
+      this.#startSidebarOverlayPointerWatch();
+      const wasVisible = view.getVisible();
+      if (!wasVisible && !this.#tabDragActive) {
+        view.setBounds(this.#sidebarOverlayOffscreenBounds(desiredBounds));
+      }
+      view.setVisible(true);
+      // Re-adding an existing child View is Electron's supported way to make it
+      // topmost, which keeps the floating sidebar above every page view.
+      this.#window.contentView.addChildView(view);
+      if (!wasVisible && process.env.CHROMA_HEADLESS_SMOKE !== "1") {
+        queueMicrotask(() => {
+          try {
+            if (this.#sidebarOverlayOpen && this.#sidebarOverlayView === view) {
+              view.setBounds(desiredBounds, {
+                animate: { duration: SIDEBAR_OVERLAY_ANIMATION_MS },
+              });
+              this.#focusSidebarOverlayAddress();
+            }
+          } catch {
+            this.#syncSidebarOverlay();
+          }
+        });
+      } else {
+        view.setBounds(desiredBounds);
+        this.#focusSidebarOverlayAddress();
+      }
+    } catch {
+      if (this.#sidebarOverlayView === view) {
+        this.#stopSidebarOverlayPointerWatch();
+        this.#sidebarOverlayView = null;
+        this.#sidebarOverlayReady = false;
+        this.#sidebarOverlayOpen = false;
+      }
     }
   }
 
@@ -1768,13 +2129,13 @@ export class BrowserController {
     this.#sidebarOverlayOpen = false;
     this.#sidebarOverlayReady = false;
     this.#sidebarOverlayKeepOpen = false;
-    const contents = view.webContents;
+    const contents = this.#safeViewContents(view, { allowDestroyed: true });
     try {
       view.setVisible(false);
       if (!this.#window.isDestroyed()) {
         this.#window.contentView.removeChildView(view);
       }
-      if (contents.isDestroyed()) return;
+      if (!contents || contents.isDestroyed()) return;
       await new Promise((resolve, reject) => {
         const onDestroyed = () => {
           clearTimeout(timeout);
@@ -1853,13 +2214,13 @@ export class BrowserController {
   #queueViewNavigation(tab, view, url, version, warning) {
     const readiness = this.#viewReady.get(tab.id) || Promise.resolve();
     void readiness.then(() => {
-      const contents = view.webContents;
+      const contents = this.#safeViewContents(view);
       if (
         this.#destroying ||
         this.#views.get(tab.id) !== view ||
         this.#tab(tab.id) !== tab ||
         this.#navigationVersions.get(tab.id) !== version ||
-        contents.isDestroyed()
+        !contents
       ) {
         return;
       }
@@ -1880,13 +2241,19 @@ export class BrowserController {
   }
 
   #isCurrentTabView(tab, view, contents) {
-    return Boolean(
-      !this.#destroying &&
-      this.#views.get(tab.id) === view &&
-      this.#tab(tab.id) === tab &&
-      contents &&
-      !contents.isDestroyed()
-    );
+    if (
+      this.#destroying ||
+      this.#views.get(tab.id) !== view ||
+      this.#tab(tab.id) !== tab ||
+      !contents
+    ) {
+      return false;
+    }
+    try {
+      return !contents.isDestroyed();
+    } catch {
+      return false;
+    }
   }
 
   #wireWebContents(tab, view) {
@@ -2082,11 +2449,18 @@ export class BrowserController {
       this.#notify(false);
     });
 
-    contents.on("render-process-gone", (_event, details) => {
+    contents.on("render-process-gone", (_event, _details) => {
       if (!isCurrentView()) return;
       tab.loading = false;
       tab.crashed = true;
-      tab.title = details.reason === "killed" ? tab.title : "Tab crashed";
+      this.#cancelAdaptiveProbe(tab.id, true);
+      this.#syncVisibleViews();
+      this.#notify(false);
+    });
+
+    contents.once("destroyed", () => {
+      if (!this.#markUnexpectedViewFailure(tab.id, view)) return;
+      this.#syncVisibleViews();
       this.#notify(false);
     });
 
@@ -2097,54 +2471,139 @@ export class BrowserController {
 
     contents.on("before-input-event", (event, input) => {
       if (!isCurrentView()) return;
-      if (
-        !["keyDown", "rawKeyDown"].includes(input.type) ||
-        input.isAutoRepeat
-      ) {
-        return;
+      this.#handleShortcutInput(event, input, tab.id);
+    });
+  }
+
+  #wireShellShortcuts(contents) {
+    if (!contents || this.#shellShortcutHandlers.has(contents)) return;
+    const handler = (event, input) => {
+      if (this.#destroying || !this.#acceptCommands) return;
+      this.#handleShortcutInput(event, input, this.#state.activeTabId);
+    };
+    this.#shellShortcutHandlers.set(contents, handler);
+    contents.on("before-input-event", handler);
+    contents.once("destroyed", () => {
+      this.#shellShortcutHandlers.delete(contents);
+    });
+  }
+
+  #handleShortcutInput(event, input, sourceTabId) {
+    if (this.#destroying || !this.#acceptCommands) return false;
+    const action = shortcutActionForInput(input, process.platform);
+    if (!action) return false;
+    // Browser-owned chords must never leak into the page just because the
+    // current action is unavailable (for example Back on an empty history).
+    // Keep the native event boundary fail-closed as views tear down.
+    try {
+      this.#performShortcutAction(action, sourceTabId);
+    } catch (error) {
+      if (!this.#destroying) {
+        console.warn("Unable to handle browser shortcut:", error);
       }
-      const modifier = activeModifier(input);
-      const key = String(input.key || "").toLowerCase();
-      if (modifier && key === "l") {
-        event.preventDefault();
+    }
+    try {
+      event.preventDefault();
+    } catch {
+      // The originating WebContents may disappear during the action.
+    }
+    return true;
+  }
+
+  #performShortcutAction(action, sourceTabId = this.#state.activeTabId) {
+    const tab = this.#tab(sourceTabId) || this.#tab(this.#state.activeTabId);
+    switch (action) {
+      case "address:focus":
         this.focusAddress();
-      } else if (modifier && input.shift && !input.alt && key === "p") {
-        event.preventDefault();
-        this.openCommandPalette();
-      } else if (
-        modifier &&
-        !input.shift &&
-        !input.alt &&
-        key === (process.platform === "darwin" ? "y" : "h")
-      ) {
-        event.preventDefault();
-        this.openHistory();
-      } else if (modifier && input.shift && key === "t") {
-        event.preventDefault();
+        return true;
+      case "history:open":
+        return this.openHistory();
+      case "downloads:open":
+        return this.openDownloads();
+      case "tab:create":
+        if (this.#state.tabs.length >= TAB_COUNT_LIMIT) return false;
+        this.#runDetached(this.dispatch(commands.createTab), "Unable to create tab");
+        return true;
+      case "tab:reopen":
+        if (!this.#closedTabs.length) return false;
         this.#runDetached(
           this.dispatch(commands.reopenTab),
           "Unable to reopen closed tab"
         );
-      } else if (modifier && key === "t") {
-        event.preventDefault();
-        this.#runDetached(this.dispatch(commands.createTab), "Unable to create tab");
-      } else if (modifier && key === "w") {
-        event.preventDefault();
+        return true;
+      case "tab:close":
+        if (!tab) return false;
         this.#runDetached(
           this.dispatch(commands.closeTab, { id: tab.id }),
           "Unable to close tab"
         );
-      } else if (modifier && key === "r") {
-        event.preventDefault();
-        this.reload(tab.id);
-      } else if (modifier && key === "[") {
-        event.preventDefault();
-        this.goBack(tab.id);
-      } else if (modifier && key === "]") {
-        event.preventDefault();
-        this.goForward(tab.id);
+        return true;
+      case "tab:next":
+        return this.selectAdjacentTab(1);
+      case "tab:previous":
+        return this.selectAdjacentTab(-1);
+      case "navigation:reload":
+        if (tab?.crashed) {
+          this.#runDetached(
+            this.dispatch(commands.recoverTab, { id: tab.id }),
+            "Unable to recover crashed tab"
+          );
+          return true;
+        }
+        return Boolean(tab && this.reload(tab.id));
+      case "navigation:reload-ignore-cache":
+        if (tab?.crashed) {
+          this.#runDetached(
+            this.dispatch(commands.recoverTab, { id: tab.id }),
+            "Unable to recover crashed tab"
+          );
+          return true;
+        }
+        return Boolean(tab && this.reloadIgnoringCache(tab.id));
+      case "navigation:back":
+        return Boolean(tab && this.goBack(tab.id));
+      case "navigation:forward":
+        return Boolean(tab && this.goForward(tab.id));
+      case "bookmark:toggle":
+        if (!tab || !isWebPageUrl(tab.url)) return false;
+        this.toggleBookmark(tab.id);
+        return true;
+      case "sidebar:toggle":
+        this.toggleSidebar();
+        return true;
+      case "workspace:next":
+        return this.selectAdjacentWorkspace(1);
+      case "workspace:previous":
+        return this.selectAdjacentWorkspace(-1);
+      case "split:row":
+      case "split:column": {
+        const group = tab ? this.#splitForTab(tab.id) : null;
+        if (!tab || tab.essential || tab.pinned || group?.tabIds.length >= 4) {
+          return false;
+        }
+        this.#runDetached(
+          this.dispatch(commands.splitActive, {
+            direction: action === "split:column" ? "column" : "row",
+          }),
+          "Unable to create split from shortcut"
+        );
+        return true;
       }
-    });
+      case "split:remove":
+        if (!tab || !this.#splitForTab(tab.id)) return false;
+        this.unsplitActive();
+        return true;
+      case "page:zoom-in":
+        return tab ? this.changePageZoom(tab.id, "in") !== false : false;
+      case "page:zoom-out":
+        return tab ? this.changePageZoom(tab.id, "out") !== false : false;
+      case "page:zoom-reset":
+        return tab ? this.changePageZoom(tab.id, "reset") !== false : false;
+      case "developer:open-tools":
+        return Boolean(tab && this.openDevTools(tab.id));
+      default:
+        return false;
+    }
   }
 
   #configureSession(browserSession) {
@@ -2607,7 +3066,11 @@ export class BrowserController {
       (this.#tabDragActive && !this.#tabDragUsesOverlay)
     ) {
       for (const [id, view] of this.#views) {
-        view.setVisible(false);
+        try {
+          view.setVisible(false);
+        } catch {
+          this.#markUnexpectedViewFailure(id, view);
+        }
         this.#cancelAdaptiveProbe(id, true);
       }
       this.#syncSidebarOverlay();
@@ -2631,22 +3094,29 @@ export class BrowserController {
         rects = [{ ...this.#contentBounds }];
       }
     }
+    let recoveredFromNativeFailure = false;
     for (const [id, view] of this.#views) {
       const index = visibleIds.indexOf(id);
-      const visible = index >= 0 && Boolean(rects[index]);
+      const visible = index >= 0 && Boolean(rects[index]) && !this.#tab(id)?.crashed;
       // Apply the native view size before attaching it to the compositor. When
       // a tab-drag preview temporarily hides every WebContentsView, showing a
       // view first can race its previous full-width surface back on screen and
       // the renderer can miss the corresponding resize notification.
-      if (visible) view.setBounds(rects[index]);
-      view.setVisible(visible);
-      if (visible) {
-        this.#scheduleAdaptiveLayout(id, view);
-      } else {
-        this.#cancelAdaptiveProbe(id, true);
+      try {
+        if (visible) view.setBounds(rects[index]);
+        view.setVisible(visible);
+        if (visible) {
+          this.#scheduleAdaptiveLayout(id, view);
+        } else {
+          this.#cancelAdaptiveProbe(id, true);
+        }
+      } catch {
+        recoveredFromNativeFailure = this.#markUnexpectedViewFailure(id, view) ||
+          recoveredFromNativeFailure;
       }
     }
     this.#syncSidebarOverlay();
+    if (recoveredFromNativeFailure) this.#notify(false);
   }
 
   #isCompactPane(id, view) {
@@ -3100,7 +3570,16 @@ export class BrowserController {
     queueMicrotask(() => {
       if (this.#destroying) return;
       const view = this.#viewFor(id);
-      if (view?.getVisible() && !view.webContents.isDestroyed()) view.webContents.focus();
+      const contents = this.#safeViewContents(view);
+      if (!contents) return;
+      try {
+        if (view.getVisible()) contents.focus();
+      } catch {
+        if (this.#markUnexpectedViewFailure(id, view)) {
+          this.#syncVisibleViews();
+          this.#notify(false);
+        }
+      }
     });
   }
 
@@ -3211,29 +3690,42 @@ export class BrowserController {
 
   async #destroyView(id) {
     const view = this.#views.get(id);
-    if (!view) return;
+    if (!view) return true;
+    if (this.#destroyingViewIds.has(id)) return false;
+    this.#destroyingViewIds.add(id);
     this.#cancelAdaptiveProbe(id, true);
-    this.#adaptiveViews.delete(id);
-    this.#views.delete(id);
-    this.#viewReady.delete(id);
-    this.#navigationVersions.delete(id);
-    this.#historyNavigationVersions.delete(id);
-    this.#historyRecordByTab.delete(id);
-    this.#historyNextTransitions.delete(id);
+    let closed = false;
+    let contents = null;
     try {
-      const contents = view.webContents;
-      view.setVisible(false);
+      contents = this.#safeViewContents(view, { allowDestroyed: true });
+      try {
+        view.setVisible(false);
+      } catch {
+        // A destroyed native wrapper is already no longer compositable.
+      }
       // Detach first. Keeping the view in the hierarchy until `destroyed` retains
       // its WebContents and can prevent close() from completing on Electron 43.
-      if (!this.#window.isDestroyed()) this.#window.contentView.removeChildView(view);
-      if (!contents.isDestroyed()) {
+      if (!this.#window.isDestroyed()) {
+        try {
+          this.#window.contentView.removeChildView(view);
+        } catch {
+          // Continue closing the WebContents even if Electron already detached it.
+        }
+      }
+      if (!contents) {
+        closed = true;
+      } else if (!contents.isDestroyed()) {
         // Cancel an in-flight navigation before destruction. Closing a detached
         // view in the same task while its renderer is committing can orphan the
         // target in Electron 43.
-        contents.stop();
+        try {
+          contents.stop();
+        } catch {
+          // It may have been destroyed between the guard and stop().
+        }
         await new Promise(resolve => setImmediate(resolve));
       }
-      if (!contents.isDestroyed()) {
+      if (contents && !contents.isDestroyed()) {
         await new Promise((resolve, reject) => {
           const onDestroyed = () => {
             clearTimeout(timeout);
@@ -3247,9 +3739,28 @@ export class BrowserController {
           contents.close({ waitForBeforeUnload: false });
         });
       }
+      closed = !contents || contents.isDestroyed();
     } catch (error) {
       if (!this.#destroying) console.warn("Unable to destroy tab view:", error);
+      try {
+        closed = !contents || contents.isDestroyed();
+      } catch {
+        closed = true;
+      }
+    } finally {
+      this.#destroyingViewIds.delete(id);
     }
+    if (!closed) return false;
+    if (this.#views.get(id) === view) {
+      this.#views.delete(id);
+      this.#adaptiveViews.delete(id);
+      this.#viewReady.delete(id);
+      this.#navigationVersions.delete(id);
+      this.#historyNavigationVersions.delete(id);
+      this.#historyRecordByTab.delete(id);
+      this.#historyNextTransitions.delete(id);
+    }
+    return true;
   }
 
   #commit() {
@@ -3260,12 +3771,17 @@ export class BrowserController {
   }
 
   #notify() {
-    if (!this.#window.isDestroyed() && !this.#window.webContents.isDestroyed()) {
+    try {
+      if (this.#window.isDestroyed() || this.#window.webContents.isDestroyed()) return;
       const publicState = this.getPublicState();
       this.#window.webContents.send("chroma:state-changed", publicState);
-      const overlayContents = this.#sidebarOverlayView?.webContents;
-      if (overlayContents && !overlayContents.isDestroyed()) {
+      const overlayContents = this.#safeViewContents(this.#sidebarOverlayView);
+      if (overlayContents) {
         overlayContents.send("chroma:state-changed", publicState);
+      }
+    } catch (error) {
+      if (!this.#destroying && !/destroyed/i.test(String(error?.message || ""))) {
+        console.warn("Unable to publish browser state:", error);
       }
     }
   }
@@ -3292,5 +3808,49 @@ export class BrowserController {
 
   #viewFor(id) {
     return this.#views.get(id);
+  }
+
+  #safeViewContents(view, { allowDestroyed = false } = {}) {
+    try {
+      const contents = view?.webContents;
+      if (!contents) return null;
+      if (!allowDestroyed && contents.isDestroyed()) return null;
+      return contents;
+    } catch {
+      return null;
+    }
+  }
+
+  #safeViewVisible(view) {
+    try {
+      return Boolean(view?.getVisible());
+    } catch {
+      return false;
+    }
+  }
+
+  #safeViewBounds(view) {
+    try {
+      return view ? view.getBounds() : null;
+    } catch {
+      return null;
+    }
+  }
+
+  #markUnexpectedViewFailure(id, view) {
+    if (
+      this.#destroying ||
+      this.#destroyingViewIds.has(id) ||
+      this.#views.get(id) !== view
+    ) {
+      return false;
+    }
+    const tab = this.#tab(id);
+    if (!tab) return false;
+    const changed = tab.crashed !== true || tab.loading !== false;
+    tab.crashed = true;
+    tab.loading = false;
+    this.#cancelAdaptiveProbe(id, true);
+    return changed;
   }
 }

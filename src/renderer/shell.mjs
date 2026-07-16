@@ -8,6 +8,7 @@ import {
   sanitizeAppearance,
 } from "../shared/appearance.mjs";
 import { displayNavigationUrl } from "../shared/navigation.mjs";
+import { shortcutDisplayForAction } from "../shared/shortcut-registry.mjs";
 import {
   sanitizeSplitLayout,
   setSplitRatio,
@@ -44,6 +45,7 @@ const textPromptInput = document.querySelector("#text-prompt-input");
 const textPromptCancel = document.querySelector("#text-prompt-cancel");
 const textPromptSubmit = document.querySelector("#text-prompt-submit");
 const commandPalette = document.querySelector("#command-palette");
+const commandPaletteButton = document.querySelector("#command-palette-button");
 const commandPaletteInput = document.querySelector("#command-palette-input");
 const commandPaletteResults = document.querySelector("#command-palette-results");
 const commandPaletteCount = document.querySelector("#command-palette-count");
@@ -69,6 +71,7 @@ const historyClearSubmit = document.querySelector("#history-clear-submit");
 const splitDropOverlay = document.querySelector("#split-drop-overlay");
 const splitDropLabel = document.querySelector("#split-drop-label");
 const tabDragChip = document.querySelector("#tab-drag-chip");
+const paneCrashStatus = document.querySelector("#pane-crash-status");
 const trafficLightButtons = [...document.querySelectorAll(".traffic-light")];
 
 let state = null;
@@ -101,6 +104,8 @@ let historyAllTimeConfirmPending = false;
 let commandPaletteItems = [];
 let commandPaletteIndex = 0;
 let commandPaletteOpener = null;
+let draggedWorkspaceId = null;
+const announcedCrashTabIds = new Set();
 
 const historyCommands = Object.freeze({
   query: commands.queryHistory,
@@ -238,6 +243,7 @@ function initializeStaticIcons() {
     back: "back",
     forward: "forward",
     reload: "reload",
+    "open-command-palette": "search",
     "split-row": "split",
     downloads: "download",
     appearance: "appearance",
@@ -954,12 +960,25 @@ function renderTabs() {
 
 function renderWorkspaces() {
   const switcher = document.querySelector("#workspace-switcher");
+  const focusedWorkspaceId = document.activeElement?.closest?.(".workspace-dot")
+    ?.dataset.workspaceId;
+  const tabbableWorkspaceId = state.workspaces.some(
+    workspace => workspace.id === focusedWorkspaceId
+  )
+    ? focusedWorkspaceId
+    : state.activeWorkspaceId || state.workspaces[0]?.id;
   replaceTrustedMarkup(
     switcher,
     state.workspaces
-      .map(workspace => `<button class="workspace-dot${workspace.id === state.activeWorkspaceId ? " is-active" : ""}" data-action="select-workspace" data-workspace-id="${escapeHtml(workspace.id)}" title="${escapeHtml(workspace.name)}"><span class="workspace-dot-mark" style="--workspace-color:${escapeHtml(workspace.color)}"></span></button>`)
+      .map(workspace => `<button class="workspace-dot${workspace.id === state.activeWorkspaceId ? " is-active" : ""}" type="button" role="tab" aria-selected="${workspace.id === state.activeWorkspaceId}" aria-label="${escapeHtml(workspace.name)} space" tabindex="${workspace.id === tabbableWorkspaceId ? "0" : "-1"}" draggable="true" data-action="select-workspace" data-workspace-id="${escapeHtml(workspace.id)}" title="${escapeHtml(workspace.name)}"><span class="workspace-dot-mark" style="--workspace-color:${escapeHtml(workspace.color)}"></span></button>`)
       .join("")
   );
+  const focusedReplacement = focusedWorkspaceId
+    ? [...switcher.querySelectorAll(".workspace-dot")].find(
+        item => item.dataset.workspaceId === focusedWorkspaceId
+      )
+    : null;
+  focusedReplacement?.focus({ preventScroll: true });
 }
 
 async function runCommand(command, payload = {}) {
@@ -1017,15 +1036,21 @@ function renderCommandPalette() {
   }
   replaceTrustedMarkup(
     commandPaletteResults,
-    commandPaletteItems.map((item, index) => `
+    commandPaletteItems.map((item, index) => {
+      const shortcut = shortcutDisplayForAction(
+        item.action,
+        state.runtime?.platform
+      );
+      return `
       <button id="command-option-${index}" class="command-palette-item${index === commandPaletteIndex ? " is-selected" : ""}" type="button" role="option" aria-selected="${index === commandPaletteIndex}" data-command-index="${index}" tabindex="-1">
         <span class="command-palette-item-icon">${icon(item.icon || "globe")}</span>
         <span class="command-palette-item-copy">
           <strong>${escapeHtml(item.title)}</strong>
           <small>${escapeHtml(item.category)}${item.description ? ` · ${escapeHtml(item.description)}` : ""}</small>
         </span>
-        ${item.shortcut ? `<kbd>${escapeHtml(item.shortcut)}</kbd>` : ""}
-      </button>`).join("")
+        ${shortcut ? `<kbd>${escapeHtml(shortcut)}</kbd>` : ""}
+      </button>`;
+    }).join("")
   );
   commandPaletteInput.setAttribute(
     "aria-activedescendant",
@@ -1045,6 +1070,7 @@ function openCommandPalette(query = "") {
   commandPaletteInput.value = String(query || "").slice(0, 120);
   commandPaletteIndex = 0;
   commandPalette.hidden = false;
+  commandPaletteButton?.setAttribute("aria-expanded", "true");
   api.setChromeModalOpen(true);
   renderCommandPalette();
   requestAnimationFrame(() => {
@@ -1057,6 +1083,7 @@ function openCommandPalette(query = "") {
 function closeCommandPalette({ restoreFocus = true } = {}) {
   if (commandPalette.hidden) return;
   commandPalette.hidden = true;
+  commandPaletteButton?.setAttribute("aria-expanded", "false");
   commandPaletteInput.value = "";
   commandPaletteItems = [];
   commandPaletteResults.replaceChildren();
@@ -1270,7 +1297,7 @@ function positionPopover(popover, anchorRect, preferred = "below") {
 function showWorkspaceMenu(anchor) {
   const popover = document.createElement("div");
   popover.className = "popover";
-  replaceTrustedMarkup(popover, `<div class="popover-title">Spaces</div>${state.workspaces.map(workspace => `<button class="menu-item" data-action="select-workspace" data-workspace-id="${escapeHtml(workspace.id)}"><span class="workspace-dot-mark" style="--workspace-color:${escapeHtml(workspace.color)}"></span><span>${escapeHtml(workspace.name)}</span></button>`).join("")}<div class="menu-separator"></div><button class="menu-item" data-action="new-workspace">${icon("plus")}<span>New space</span></button><button class="menu-item" data-action="rename-workspace">${icon("tools")}<span>Rename current space</span></button>`);
+  replaceTrustedMarkup(popover, `<div class="popover-title">Spaces</div>${state.workspaces.map(workspace => `<button class="menu-item" data-action="select-workspace" data-workspace-id="${escapeHtml(workspace.id)}"><span class="workspace-dot-mark" style="--workspace-color:${escapeHtml(workspace.color)}"></span><span>${escapeHtml(workspace.name)}</span></button>`).join("")}<div class="menu-separator"></div><button class="menu-item" data-action="new-workspace">${icon("plus")}<span>New space</span></button><button class="menu-item" data-action="rename-workspace">${icon("tools")}<span>Rename current space</span></button><button class="menu-item danger" data-action="delete-workspace"${state.workspaces.length <= 1 ? " disabled" : ""}>${icon("trash")}<span>Delete current space</span></button>`);
   positionPopover(popover, anchor.getBoundingClientRect());
   presentPopover(popover);
 }
@@ -1515,6 +1542,13 @@ function showTabMenu(tabId, x, y) {
   const folderAction = movable
     ? `<button class="menu-item" data-action="context-folder">${icon("folder")}<span>Move to new folder</span></button>`
     : "";
+  const inFolder = state.folders.some(folder => folder.tabIds.includes(tab.id));
+  const workspaceActions = movable && !group && !inFolder
+    ? state.workspaces
+        .filter(workspace => workspace.id !== tab.workspaceId)
+        .map(workspace => `<button class="menu-item" data-action="context-move-workspace" data-workspace-id="${escapeHtml(workspace.id)}"><span class="workspace-dot-mark" style="--workspace-color:${escapeHtml(workspace.color)}"></span><span>Move to ${escapeHtml(workspace.name)}</span></button>`)
+        .join("")
+    : "";
   const splitActions = movable
     ? group
       ? `<button class="menu-item" data-action="context-unsplit">${icon("grid")}<span>Exit split view</span></button>`
@@ -1522,7 +1556,7 @@ function showTabMenu(tabId, x, y) {
     : "";
   const popover = document.createElement("div");
   popover.className = "popover";
-  replaceTrustedMarkup(popover, `${pinAction}<button class="menu-item" data-action="context-essential">${icon("pin")}<span>${tab.essential ? "Remove from Essentials" : "Add to Essentials"}</span></button><button class="menu-item" data-action="context-mute">${icon(tab.muted ? "volume" : "muted")}<span>${tab.muted ? "Unmute tab" : "Mute tab"}</span></button>${folderAction}<div class="menu-separator"></div>${splitActions}<button class="menu-item" data-action="context-devtools">${icon("tools")}<span>Developer tools</span></button><div class="menu-separator"></div><button class="menu-item" data-action="context-close">${icon("close")}<span>Close tab</span></button>`);
+  replaceTrustedMarkup(popover, `${pinAction}<button class="menu-item" data-action="context-essential">${icon("pin")}<span>${tab.essential ? "Remove from Essentials" : "Add to Essentials"}</span></button><button class="menu-item" data-action="context-mute">${icon(tab.muted ? "volume" : "muted")}<span>${tab.muted ? "Unmute tab" : "Mute tab"}</span></button>${folderAction}${workspaceActions ? `<div class="menu-separator"></div>${workspaceActions}` : ""}<div class="menu-separator"></div>${splitActions}<button class="menu-item" data-action="context-devtools">${icon("tools")}<span>Developer tools</span></button><div class="menu-separator"></div><button class="menu-item" data-action="context-close">${icon("close")}<span>Close tab</span></button>`);
   const fakeRect = { left: x, right: x, top: y, bottom: y };
   positionPopover(popover, fakeRect);
   presentPopover(popover, tabId);
@@ -1596,7 +1630,25 @@ function scheduleLayout() {
   });
 }
 
+function syncCrashAnnouncement() {
+  const crashedTabs = state.tabs.filter(tab => tab.crashed);
+  const crashedIds = new Set(crashedTabs.map(tab => tab.id));
+  for (const id of announcedCrashTabIds) {
+    if (!crashedIds.has(id)) announcedCrashTabIds.delete(id);
+  }
+  const newlyCrashed = crashedTabs.filter(tab => !announcedCrashTabIds.has(tab.id));
+  if (!newlyCrashed.length) {
+    if (!crashedTabs.length) paneCrashStatus.textContent = "";
+    return;
+  }
+  newlyCrashed.forEach(tab => announcedCrashTabIds.add(tab.id));
+  paneCrashStatus.textContent = newlyCrashed.length === 1
+    ? `${newlyCrashed[0].title || "This tab"} stopped working.`
+    : `${newlyCrashed.length} tabs stopped working.`;
+}
+
 function renderPaneFrames(viewportRect) {
+  syncCrashAnnouncement();
   const focusedDivider = document.activeElement?.closest?.(".pane-divider");
   const focusedDividerKey = focusedDivider && paneFrameLayer.contains(focusedDivider)
     ? {
@@ -1604,9 +1656,45 @@ function renderPaneFrames(viewportRect) {
         path: focusedDivider.dataset.splitPath,
       }
     : null;
+  const focusedCrashAction = document.activeElement?.closest?.(
+    ".pane-crash-card [data-action]"
+  );
+  const focusedCrashActionKey = focusedCrashAction && paneFrameLayer.contains(focusedCrashAction)
+    ? {
+        tabId: focusedCrashAction.dataset.tabId,
+        action: focusedCrashAction.dataset.action,
+      }
+    : null;
+  const restorePaneLayerFocus = () => {
+    if (focusedCrashActionKey) {
+      const replacement = [...paneFrameLayer.querySelectorAll(
+        ".pane-crash-card [data-action]"
+      )].find(control =>
+        control.dataset.tabId === focusedCrashActionKey.tabId &&
+        control.dataset.action === focusedCrashActionKey.action
+      );
+      replacement?.focus({ preventScroll: true });
+    }
+  };
   const ids = visiblePaneIds();
-  if (ids.length < 2) {
+  if (!ids.length) {
     replaceTrustedMarkup(paneFrameLayer, "");
+    return;
+  }
+  if (ids.length === 1) {
+    const tab = state.tabs.find(item => item.id === ids[0]);
+    replaceTrustedMarkup(
+      paneFrameLayer,
+      tab?.crashed
+        ? paneCrashMarkup(tab, {
+            x: 0,
+            y: 0,
+            width: viewportRect.width,
+            height: viewportRect.height,
+          })
+        : ""
+    );
+    restorePaneLayerFocus();
     return;
   }
   const group = splitForTab(state.activeTabId);
@@ -1626,7 +1714,8 @@ function renderPaneFrames(viewportRect) {
   const frames = geometry.frameRects.map((rect, index) => {
     const id = geometry.paneIds[index];
     const active = id === state.activeTabId ? " is-active" : "";
-    return `<div class="pane-frame${active}" aria-hidden="true" data-tab-id="${escapeHtml(id)}" style="left:${rect.x}px;top:${rect.y}px;width:${rect.width}px;height:${rect.height}px"></div>`;
+    const tab = state.tabs.find(item => item.id === id);
+    return `<div class="pane-frame${active}" aria-hidden="true" data-tab-id="${escapeHtml(id)}" style="left:${rect.x}px;top:${rect.y}px;width:${rect.width}px;height:${rect.height}px"></div>${tab?.crashed ? paneCrashMarkup(tab, rect) : ""}`;
   });
   const dividers = geometry.dividers.map(divider => {
     const rowDivider = divider.direction === "row";
@@ -1658,6 +1747,24 @@ function renderPaneFrames(viewportRect) {
       );
     replacement?.focus({ preventScroll: true });
   }
+  restorePaneLayerFocus();
+}
+
+function paneCrashMarkup(tab, rect) {
+  const id = escapeHtml(tab.id);
+  const title = escapeHtml(tab.title || "This tab");
+  const headingId = `pane-crash-title-${id}`;
+  return `<section class="pane-crash-card" role="region" aria-labelledby="${headingId}" data-tab-id="${id}" style="left:${rect.x}px;top:${rect.y}px;width:${rect.width}px;height:${rect.height}px">
+    <div class="pane-crash-content">
+      <span class="pane-crash-icon" aria-hidden="true">!</span>
+      <h2 id="${headingId}">This tab stopped working</h2>
+      <p>${title}</p>
+      <div class="pane-crash-actions">
+        <button class="primary" type="button" data-action="recover-tab" data-tab-id="${id}">Reload tab</button>
+        <button type="button" data-action="close-tab" data-tab-id="${id}">Close</button>
+      </div>
+    </div>
+  </section>`;
 }
 
 function sidebarOverlayBounds() {
@@ -1716,6 +1823,9 @@ async function handleAction(action, element) {
       break;
     case "reload":
       await runCommand(activeTab()?.loading ? commands.stop : commands.reload, { id: state.activeTabId });
+      break;
+    case "recover-tab":
+      await runCommand(commands.recoverTab, { id: tabId || state.activeTabId });
       break;
     case "window-close":
       api.windowControl("close");
@@ -1852,6 +1962,24 @@ async function handleAction(action, element) {
         submitLabel: "Rename",
       });
       if (name) await runCommand(commands.renameWorkspace, { id: workspace.id, name });
+      break;
+    }
+    case "delete-workspace": {
+      const workspace = activeWorkspace();
+      closePopover({ keepModalOpen: Boolean(workspace) });
+      if (!workspace || state.workspaces.length <= 1) break;
+      const tabCount = state.tabs.filter(tab => tab.workspaceId === workspace.id).length;
+      const confirmed = await requestConfirmation({
+        title: "Delete space?",
+        message: `Deleting “${workspace.name}” will close its ${tabCount} ${tabCount === 1 ? "tab" : "tabs"}, folders, and split views. This cannot be undone.`,
+        confirmLabel: "Delete space",
+      });
+      if (confirmed) {
+        const deleted = await runCommand(commands.deleteWorkspace, {
+          id: workspace.id,
+        });
+        if (deleted !== true) showToast("This space could not be deleted.");
+      }
       break;
     }
     case "new-folder": {
@@ -1996,6 +2124,19 @@ async function handleAction(action, element) {
       }
       break;
     }
+    case "context-move-workspace": {
+      const moveTabId = contextTabId;
+      const workspaceId = element.dataset.workspaceId;
+      const moved = await runCommand(commands.moveTabToWorkspace, {
+        id: moveTabId,
+        workspaceId,
+      });
+      closePopover();
+      if (moved !== true) {
+        showToast("Pinned, Essential, folder, and split tabs cannot be moved yet.");
+      }
+      break;
+    }
     case "context-split-row":
     case "context-split-column": {
       const splitTab = state.tabs.find(tab => tab.id === contextTabId);
@@ -2066,6 +2207,91 @@ document.addEventListener("contextmenu", event => {
     x: event.clientX,
     y: event.clientY,
   });
+});
+
+document.addEventListener("dragstart", event => {
+  const workspace = event.target.closest?.(".workspace-dot");
+  if (!workspace) return;
+  draggedWorkspaceId = workspace.dataset.workspaceId || null;
+  if (!draggedWorkspaceId) return;
+  workspace.classList.add("is-dragging");
+  event.dataTransfer?.setData("text/x-chroma-workspace", draggedWorkspaceId);
+  if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
+});
+
+document.addEventListener("dragover", event => {
+  const target = event.target.closest?.(".workspace-dot");
+  if (!target || !draggedWorkspaceId || target.dataset.workspaceId === draggedWorkspaceId) {
+    return;
+  }
+  event.preventDefault();
+  document.querySelectorAll(".workspace-dot.is-drop-before, .workspace-dot.is-drop-after")
+    .forEach(item => item.classList.remove("is-drop-before", "is-drop-after"));
+  const bounds = target.getBoundingClientRect();
+  target.classList.add(
+    event.clientX < bounds.left + bounds.width / 2
+      ? "is-drop-before"
+      : "is-drop-after"
+  );
+  if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+});
+
+document.addEventListener("drop", event => {
+  const target = event.target.closest?.(".workspace-dot");
+  const sourceId = draggedWorkspaceId ||
+    event.dataTransfer?.getData("text/x-chroma-workspace");
+  if (!target || !sourceId || target.dataset.workspaceId === sourceId) return;
+  event.preventDefault();
+  const bounds = target.getBoundingClientRect();
+  void runCommand(commands.reorderWorkspace, {
+    id: sourceId,
+    targetId: target.dataset.workspaceId,
+    position: event.clientX < bounds.left + bounds.width / 2 ? "before" : "after",
+  });
+});
+
+document.addEventListener("dragend", () => {
+  draggedWorkspaceId = null;
+  document.querySelectorAll(
+    ".workspace-dot.is-dragging, .workspace-dot.is-drop-before, .workspace-dot.is-drop-after"
+  ).forEach(item => item.classList.remove(
+    "is-dragging",
+    "is-drop-before",
+    "is-drop-after"
+  ));
+});
+
+document.querySelector("#workspace-switcher").addEventListener("keydown", event => {
+  if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+  const current = event.target.closest?.(".workspace-dot");
+  if (!current) return;
+  const workspaces = [...event.currentTarget.querySelectorAll(".workspace-dot")];
+  const currentIndex = workspaces.indexOf(current);
+  if (currentIndex < 0) return;
+  let nextIndex = currentIndex;
+  if (event.key === "ArrowLeft") {
+    nextIndex = (currentIndex - 1 + workspaces.length) % workspaces.length;
+  } else if (event.key === "ArrowRight") {
+    nextIndex = (currentIndex + 1) % workspaces.length;
+  } else if (event.key === "Home") {
+    nextIndex = 0;
+  } else if (event.key === "End") {
+    nextIndex = workspaces.length - 1;
+  } else {
+    return;
+  }
+  event.preventDefault();
+  const nextWorkspace = workspaces[nextIndex];
+  workspaces.forEach(workspace => {
+    workspace.tabIndex = workspace === nextWorkspace ? 0 : -1;
+  });
+  nextWorkspace.focus({ preventScroll: true });
+  nextWorkspace.scrollIntoView({ block: "nearest", inline: "nearest" });
+  if (nextWorkspace.dataset.workspaceId !== state.activeWorkspaceId) {
+    void runCommand(commands.selectWorkspace, {
+      id: nextWorkspace.dataset.workspaceId,
+    });
+  }
 });
 
 document.addEventListener("error", event => {
@@ -2943,9 +3169,6 @@ commandPaletteResults.addEventListener("click", event => {
 });
 
 document.addEventListener("keydown", event => {
-  const isMac = navigator.platform.includes("Mac");
-  const modifier = isMac ? event.metaKey : event.ctrlKey;
-  const key = event.key.toLowerCase();
   if (event.key === "Escape") {
     if (splitDividerDrag) {
       event.preventDefault();
@@ -2981,44 +3204,6 @@ document.addEventListener("keydown", event => {
       api.updateSidebarOverlay({ open: false });
     }
     return;
-  }
-  if (!modifier) return;
-  if (event.shiftKey && !event.altKey && key === "p") {
-    event.preventDefault();
-    if (!commandPalette.hidden) {
-      closeCommandPalette();
-    } else if (isSidebarOverlay && typeof api.requestOpenCommandPalette === "function") {
-      api.requestOpenCommandPalette();
-      api.updateSidebarOverlay({ open: false });
-    } else {
-      openCommandPalette();
-    }
-  } else if (!commandPalette.hidden) {
-    return;
-  } else if ((isMac && key === "y") || (!isMac && key === "h")) {
-    event.preventDefault();
-    openHistoryPanel();
-  } else if (!historyPanel.hidden) {
-    return;
-  } else if (key === "l") {
-    event.preventDefault();
-    if (state.settings.sidebarCollapsed && !isSidebarOverlay) {
-      openSidebarOverlay({ focusAddress: true });
-    } else {
-      addressInput.focus();
-    }
-  } else if (key === "t" && event.shiftKey) {
-    event.preventDefault();
-    void runCommand(commands.reopenTab);
-  } else if (key === "t") {
-    event.preventDefault();
-    void runCommand(commands.createTab);
-  } else if (key === "w") {
-    event.preventDefault();
-    void runCommand(commands.closeTab, { id: state.activeTabId });
-  } else if (key === "r") {
-    event.preventDefault();
-    void runCommand(commands.reload, { id: state.activeTabId });
   }
 });
 
@@ -3102,6 +3287,10 @@ async function start() {
   });
   api.onOpenHistory?.(() => {
     openHistoryPanel();
+  });
+  api.onOpenDownloads?.(() => {
+    const anchor = document.querySelector('[data-action="downloads"]');
+    if (anchor) showDownloads(anchor);
   });
   api.onOpenCommandPalette?.(() => {
     openCommandPalette();

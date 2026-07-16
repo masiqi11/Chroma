@@ -58,6 +58,10 @@ class MockWebContents extends EventEmitter {
     this.userAgentCalls = [];
     this.sent = [];
     this.audioMuted = false;
+    this.reloadCalls = 0;
+    this.reloadIgnoringCacheCalls = 0;
+    this.zoomFactor = 1;
+    this.devToolsCalls = 0;
     this.windowOpenHandler = null;
     this.beforeClose = null;
   }
@@ -91,7 +95,11 @@ class MockWebContents extends EventEmitter {
   }
 
   getZoomFactor() {
-    return 1;
+    return this.zoomFactor;
+  }
+
+  setZoomFactor(value) {
+    this.zoomFactor = value;
   }
 
   loadURL(url) {
@@ -107,9 +115,19 @@ class MockWebContents extends EventEmitter {
 
   stop() {}
 
-  reload() {}
+  reload() {
+    this.reloadCalls += 1;
+  }
+
+  reloadIgnoringCache() {
+    this.reloadIgnoringCacheCalls += 1;
+  }
 
   inspectElement() {}
+
+  openDevTools() {
+    this.devToolsCalls += 1;
+  }
 
   send(channel, payload) {
     this.sent.push({ channel, payload });
@@ -125,33 +143,58 @@ class MockWebContents extends EventEmitter {
 
 export class WebContentsView {
   constructor() {
-    this.webContents = new MockWebContents();
+    this._webContents = new MockWebContents();
+    this.throwOnWebContentsAccess = false;
+    this.throwOnNativeAccess = false;
     this.visible = false;
     this.bounds = { x: 0, y: 0, width: 1, height: 1 };
     electronMock.views.push(this);
-    electronMock.contents.push(this.webContents);
+    electronMock.contents.push(this._webContents);
     setImmediate(() => {
-      if (!this.webContents.isDestroyed()) this.webContents.emit("dom-ready");
+      if (!this._webContents.isDestroyed()) this._webContents.emit("dom-ready");
     });
   }
 
+  get webContents() {
+    if (this.throwOnWebContentsAccess) {
+      throw new TypeError("Object has been destroyed");
+    }
+    return this._webContents;
+  }
+
+  get unsafeWebContents() {
+    return this._webContents;
+  }
+
+  assertNativeUsable() {
+    if (this.throwOnNativeAccess) {
+      throw new TypeError("Object has been destroyed");
+    }
+  }
+
   setVisible(value) {
+    this.assertNativeUsable();
     this.visible = Boolean(value);
   }
 
   getVisible() {
+    this.assertNativeUsable();
     return this.visible;
   }
 
   setBounds(bounds) {
+    this.assertNativeUsable();
     this.bounds = { ...bounds };
   }
 
   getBounds() {
+    this.assertNativeUsable();
     return { ...this.bounds };
   }
 
   setBorderRadius() {}
+
+  setBackgroundColor() {}
 }
 
 export class MockBrowserWindow {

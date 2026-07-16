@@ -279,7 +279,9 @@ test("the command palette is a searchable keyboard-accessible modal", async () =
   assert.match(index, /id="command-palette-results"[^>]+role="listbox"/);
   assert.match(shell, /DEFAULT_BROWSER_COMMANDS/);
   assert.match(shell, /searchCommands\(commandPaletteInput\.value/);
-  assert.match(shell, /event\.shiftKey && !event\.altKey && key === "p"/);
+  assert.match(index, /data-action="open-command-palette"[^>]+aria-label="Open command palette"/);
+  assert.doesNotMatch(shell, /event\.shiftKey && !event\.altKey && key === "p"/);
+  assert.match(shell, /shortcutDisplayForAction/);
   assert.match(shell, /case "address:focus"/);
   assert.match(shell, /case "history:open"/);
   assert.match(shell, /case "downloads:open"/);
@@ -382,6 +384,101 @@ test("appearance settings expose an accessible strict four-field editor", async 
     styles,
     /@media \(prefers-contrast: more\)[\s\S]*\.appearance-popover\s*\{[^}]*background:\s*Canvas[^}]*backdrop-filter:\s*none/
   );
+});
+
+test("workspace lifecycle UI is accessible, reorderable, and explicit about deletion", async () => {
+  const [index, shell, styles] = await Promise.all([
+    indexSourcePromise,
+    shellSourcePromise,
+    stylesSourcePromise,
+  ]);
+  const renderBody = sourceBetween(
+    shell,
+    "function renderWorkspaces()",
+    "async function runCommand"
+  );
+  const menuBody = sourceBetween(
+    shell,
+    "function showWorkspaceMenu(anchor)",
+    "function showAppearance(anchor)"
+  );
+  const actionBody = sourceBetween(
+    shell,
+    "async function handleAction(action, element)",
+    'document.addEventListener("click", event => {'
+  );
+
+  assert.match(index, /id="workspace-switcher"[^>]+role="tablist"/);
+  assert.match(renderBody, /role="tab"/);
+  assert.match(renderBody, /aria-selected=/);
+  assert.match(renderBody, /tabindex="\$\{workspace\.id === tabbableWorkspaceId \? "0" : "-1"\}"/);
+  assert.match(renderBody, /draggable="true"/);
+  assert.match(menuBody, /data-action="delete-workspace"/);
+  assert.match(menuBody, /state\.workspaces\.length <= 1/);
+  assert.match(actionBody, /commands\.deleteWorkspace/);
+  assert.match(actionBody, /requestConfirmation/);
+  assert.match(actionBody, /commands\.moveTabToWorkspace/);
+  assert.match(shell, /text\/x-chroma-workspace/);
+  assert.match(shell, /commands\.reorderWorkspace/);
+  assert.match(shell, /#workspace-switcher"\)\.addEventListener\("keydown"/);
+  assert.match(shell, /event\.key === "ArrowLeft"/);
+  assert.match(shell, /event\.key === "ArrowRight"/);
+  assert.match(shell, /commands\.selectWorkspace/);
+  assert.match(styles, /\.workspace-switcher\s*\{[^}]*overflow-x:\s*auto/s);
+  assert.match(styles, /\.workspace-dot:focus-visible/);
+  assert.match(styles, /\.workspace-dot\.is-drop-before/);
+  assert.match(styles, /\.workspace-dot\.is-drop-after/);
+});
+
+test("crashed single and split panes expose an accessible recovery surface", async () => {
+  const [shell, styles] = await Promise.all([
+    shellSourcePromise,
+    stylesSourcePromise,
+  ]);
+  const renderBody = sourceBetween(
+    shell,
+    "function renderPaneFrames(viewportRect)",
+    "function sidebarOverlayBounds()"
+  );
+  const crashBody = sourceBetween(
+    shell,
+    "function paneCrashMarkup(tab, rect)",
+    "function sidebarOverlayBounds()"
+  );
+
+  assert.match(renderBody, /ids\.length === 1/);
+  assert.match(renderBody, /tab\?\.crashed/);
+  assert.match(renderBody, /paneCrashMarkup\(tab, rect\)/);
+  assert.match(crashBody, /class="pane-crash-card"/);
+  assert.match(crashBody, /role="region"/);
+  assert.match(crashBody, /aria-labelledby=/);
+  assert.match(crashBody, /data-action="recover-tab"/);
+  assert.match(crashBody, /data-action="close-tab"/);
+  assert.match(shell, /commands\.recoverTab/);
+  assert.match(styles, /\.pane-crash-card\s*\{/);
+  assert.match(styles, /\.pane-crash-card\s*\{[^}]*overflow:\s*auto/s);
+  assert.match(styles, /\.pane-crash-actions\s*\{[^}]*flex-wrap:\s*wrap/s);
+  assert.match(styles, /\.pane-crash-actions button:focus-visible/);
+});
+
+test("command and workspace chrome expose modal state and durable focus styles", async () => {
+  const [index, shell, styles] = await Promise.all([
+    indexSourcePromise,
+    shellSourcePromise,
+    stylesSourcePromise,
+  ]);
+
+  assert.match(index, /id="command-palette-button"[^>]+aria-haspopup="dialog"[^>]+aria-controls="command-palette"[^>]+aria-expanded="false"/);
+  assert.match(shell, /commandPaletteButton\?\.setAttribute\("aria-expanded", "true"\)/);
+  assert.match(shell, /commandPaletteButton\?\.setAttribute\("aria-expanded", "false"\)/);
+  assert.match(index, /id="pane-crash-status"[^>]+role="status"[^>]+aria-live="assertive"/);
+  assert.match(shell, /function syncCrashAnnouncement\(\)/);
+  assert.match(shell, /focusedCrashActionKey/);
+  assert.match(styles, /\.icon-button:focus-visible/);
+  assert.match(styles, /\.menu-item\.danger\s*\{/);
+  assert.match(styles, /\.menu-item:disabled\s*\{/);
+  assert.match(styles, /\.app\.is-sidebar-overlay \.workspace-actions\s*\{[^}]*width:\s*0[^}]*flex:\s*0 0 0/s);
+  assert.match(styles, /\.app\.is-sidebar-overlay \.workspace-header:hover \.workspace-actions/);
 });
 
 test("split dividers preview live geometry and commit one durable ratio", async () => {

@@ -154,7 +154,6 @@ export const DEFAULT_BROWSER_COMMANDS = createCommandCatalog([
     description: "Search the web or enter an address",
     aliases: ["address bar", "location bar", "omnibox", "地址栏", "搜索栏", "网址"],
     keywords: ["search", "url", "navigate", "搜索", "输入网址"],
-    shortcut: "⌘L",
     icon: "search",
   },
   {
@@ -164,7 +163,6 @@ export const DEFAULT_BROWSER_COMMANDS = createCommandCatalog([
     category: "Tabs",
     aliases: ["open tab", "create tab", "新标签页", "新建标签", "打开标签页"],
     keywords: ["tab", "page", "标签", "页面"],
-    shortcut: "⌘T",
     icon: "plus",
   },
   {
@@ -174,7 +172,6 @@ export const DEFAULT_BROWSER_COMMANDS = createCommandCatalog([
     category: "Tabs",
     aliases: ["close page", "关闭标签页", "关闭页面", "关掉页面"],
     keywords: ["tab", "remove", "标签", "关闭"],
-    shortcut: "⌘W",
     icon: "close",
     enabled: hasActiveTab,
   },
@@ -191,7 +188,6 @@ export const DEFAULT_BROWSER_COMMANDS = createCommandCatalog([
       "撤销关闭",
     ],
     keywords: ["recent tab", "closed", "恢复", "标签"],
-    shortcut: "⇧⌘T",
     icon: "restore",
     enabled: canRestoreTab,
   },
@@ -202,7 +198,6 @@ export const DEFAULT_BROWSER_COMMANDS = createCommandCatalog([
     category: "Navigation",
     aliases: ["refresh", "reload tab", "刷新", "重新加载", "刷新页面"],
     keywords: ["page", "website", "页面", "网页"],
-    shortcut: "⌘R",
     icon: "reload",
     enabled: context => hasActiveTab(context) && context?.canReload !== false,
   },
@@ -213,7 +208,6 @@ export const DEFAULT_BROWSER_COMMANDS = createCommandCatalog([
     category: "Library",
     aliases: ["bookmark page", "favorite", "书签", "收藏", "添加书签", "移除书签"],
     keywords: ["save page", "saved", "保存网页", "收藏夹"],
-    shortcut: "⌘D",
     icon: "star",
     enabled: context => hasActiveTab(context) && context?.canBookmark !== false,
   },
@@ -224,7 +218,6 @@ export const DEFAULT_BROWSER_COMMANDS = createCommandCatalog([
     category: "View",
     aliases: ["show sidebar", "hide sidebar", "侧边栏", "边栏", "显示侧栏", "隐藏侧栏"],
     keywords: ["panel", "tabs", "面板", "标签栏"],
-    shortcut: "⌘S",
     icon: "sidebar",
   },
   {
@@ -244,7 +237,6 @@ export const DEFAULT_BROWSER_COMMANDS = createCommandCatalog([
     category: "Library",
     aliases: ["browsing history", "history manager", "历史记录", "浏览记录", "打开历史"],
     keywords: ["visited", "recent pages", "访问记录", "最近网页"],
-    shortcut: "⌘Y",
     icon: "history",
     enabled: context => context?.historyAvailable !== false,
   },
@@ -255,7 +247,6 @@ export const DEFAULT_BROWSER_COMMANDS = createCommandCatalog([
     category: "Library",
     aliases: ["download manager", "downloads", "下载", "下载内容", "下载管理"],
     keywords: ["files", "transfers", "文件", "传输"],
-    shortcut: "⇧⌘J",
     icon: "download",
     enabled: context => context?.downloadsAvailable !== false,
   },
@@ -266,7 +257,6 @@ export const DEFAULT_BROWSER_COMMANDS = createCommandCatalog([
     category: "Developer",
     aliases: ["devtools", "developer tools", "inspect", "开发者工具", "检查元素", "调试工具"],
     keywords: ["console", "debug", "elements", "控制台", "调试"],
-    shortcut: "⌥⌘I",
     icon: "developer",
     enabled: context => context?.developerToolsAllowed !== false,
   },
@@ -387,4 +377,3 @@ export function searchCommands(
     .slice(0, resultLimit)
     .map(({ item }) => item);
 }
-

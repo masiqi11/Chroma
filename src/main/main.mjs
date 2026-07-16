@@ -11,6 +11,7 @@ import {
 import { StateStore } from "./state-store.mjs";
 import { installProcessOutputGuards } from "./process-output.mjs";
 import { channels, commandNames, commands } from "../shared/channels.mjs";
+import { menuAcceleratorForAction } from "../shared/shortcut-registry.mjs";
 
 installProcessOutputGuards();
 
@@ -250,8 +251,8 @@ ipcMain.handle(channels.getState, event =>
   requireControllerForEvent(event).getPublicState()
 );
 if (process.env.CHROMA_HEADLESS_SMOKE === "1") {
-  ipcMain.handle(channels.smokeViewports, event =>
-    requireControllerForEvent(event).getSmokeViewports()
+  ipcMain.handle(channels.smokeViewports, (event, options) =>
+    requireControllerForEvent(event).getSmokeViewports(options)
   );
 }
 ipcMain.handle(channels.invoke, (event, command, payload) => {
@@ -352,7 +353,8 @@ function installApplicationMenu() {
       submenu: [
         {
           label: "New Tab",
-          accelerator: "CmdOrCtrl+T",
+          accelerator: menuAcceleratorForAction("tab:create", process.platform),
+          registerAccelerator: false,
           click: (_item, window) => runDetached(
             controllers.get(window?.webContents.id)?.dispatch(commands.createTab),
             "Unable to create tab from application menu"
@@ -360,7 +362,8 @@ function installApplicationMenu() {
         },
         {
           label: "Reopen Closed Tab",
-          accelerator: "CmdOrCtrl+Shift+T",
+          accelerator: menuAcceleratorForAction("tab:reopen", process.platform),
+          registerAccelerator: false,
           click: (_item, window) => runDetached(
             controllers.get(window?.webContents.id)?.dispatch(commands.reopenTab),
             "Unable to reopen tab from application menu"
@@ -378,7 +381,8 @@ function installApplicationMenu() {
         { type: "separator" },
         {
           label: "Toggle Sidebar",
-          accelerator: "CmdOrCtrl+Shift+S",
+          accelerator: menuAcceleratorForAction("sidebar:toggle", process.platform),
+          registerAccelerator: false,
           click: (_item, window) => runDetached(
             controllers.get(window?.webContents.id)?.dispatch(commands.toggleSidebar),
             "Unable to toggle sidebar from application menu"
@@ -386,7 +390,11 @@ function installApplicationMenu() {
         },
         {
           label: "Developer Tools",
-          accelerator: process.platform === "darwin" ? "Alt+Command+I" : "Ctrl+Shift+I",
+          accelerator: menuAcceleratorForAction(
+            "developer:open-tools",
+            process.platform
+          ),
+          registerAccelerator: false,
           click: (_item, window) => runDetached(
             controllers.get(window?.webContents.id)?.dispatch(commands.openDevTools),
             "Unable to open developer tools from application menu"

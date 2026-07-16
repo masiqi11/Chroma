@@ -1,0 +1,69 @@
+{
+  "schemaVersion": 1,
+  "timestamp": "2026-07-16T08:11:49.882Z",
+  "startedAt": "2026-07-16T08:11:44.105Z",
+  "git": {
+    "commit": "c112407c59f71191868a6f7f0c866d009aca02bb",
+    "dirty": true
+  },
+  "platform": "darwin",
+  "arch": "arm64",
+  "osRelease": "27.0.0",
+  "node": "25.9.0",
+  "electron": "43.1.0",
+  "mode": "headless-electron-performance-smoke",
+  "finishedAt": "2026-07-16T08:11:49.882Z",
+  "passed": true,
+  "status": "passed",
+  "chromium": "150.0.7871.47",
+  "tabCount": 8,
+  "thresholds": {
+    "maxShellReadyMs": 20000,
+    "maxFirstLocalPageReadyMs": 25000,
+    "maxIdleRssMiB": 900,
+    "maxEightTabsRssMiB": 1800,
+    "maxEightTabsDeltaRssMiB": 1100
+  },
+  "measurements": {
+    "shellReadyMs": 857.2,
+    "firstLocalPageReadyMs": 1208,
+    "firstLocalPageAfterShellMs": 350.8,
+    "idleRssMiB": 725.5,
+    "idleRssPeakMiB": 725.5,
+    "eightTabsRssMiB": 1369.9,
+    "eightTabsRssPeakMiB": 1370.1,
+    "eightTabsDeltaRssMiB": 644.4
+  },
+  "samples": {
+    "idleRssMiB": [
+      725.1,
+      725.1,
+      725.5,
+      725.5,
+      725.5
+    ],
+    "idleProcessCounts": [
+      6,
+      6,
+      6,
+      6,
+      6
+    ],
+    "eightTabsRssMiB": [
+      1369.9,
+      1369.9,
+      1369.9,
+      1369.9,
+      1370.1
+    ],
+    "eightTabsProcessCounts": [
+      13,
+      13,
+      13,
+      13,
+      13
+    ]
+  },
+  "fatalLogMatches": [],
+  "cleanupErrors": []
+}
