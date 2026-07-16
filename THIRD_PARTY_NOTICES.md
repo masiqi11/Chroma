@@ -13,7 +13,9 @@ distribution.
 
 All current npm entries are declared as development dependencies. The packaged
 ASAR allow-list contains Chroma's runtime source and `package.json`, not npm's
-`node_modules`; Electron itself supplies the application runtime.
+`node_modules`; Electron itself supplies the application runtime. The readable
+release-license resources are copied separately under
+`Contents/Resources/licenses/`, outside ASAR.
 
 | Package | Resolved version | Declared license | Current role |
 |---|---:|---|---|
@@ -90,15 +92,22 @@ they were not present in the inspected Chroma ASAR:
 | `@types/node` | 24.13.3 | MIT | `node_modules/@types/node/LICENSE` |
 
 A public Chroma binary must preserve all notices required by Electron,
-Chromium, and their bundled components. The current local package-smoke artifact
-does not constitute that release compliance bundle; its purpose is only to
-verify startup and the ASAR boundary.
+Chromium, and their bundled components. The current local package smoke verifies
+startup, the ASAR boundary, and this minimum directly readable resource set in
+`dist/mac-arm64/Chroma.app/Contents/Resources/licenses/`:
 
-**Current release blocker:** inspection of `dist/mac-arm64/Chroma.app` found no
-`LICENSE`, `NOTICE`, or third-party notice file in the application bundle, and
-none in `app.asar`. The current artifact therefore must not be presented as a
-notice-complete public release. The packaging gate does not currently test this
-requirement.
+```text
+Chroma-LICENSE.txt
+Chroma-NOTICE.md
+THIRD_PARTY_NOTICES.md
+Electron-LICENSE.txt
+LICENSES.chromium.html
+```
+
+All five were present in the inspected artifact. This resolves the earlier
+missing-notice packaging defect, but it does not by itself establish that the
+set is legally complete for a public release. A frozen-artifact SBOM, asset and
+binary inventory, and legal review have not yet been completed.
 
 ## Projects and marks that are not dependencies
 
@@ -118,9 +127,9 @@ Before publishing a source or binary release:
 2. Generate a release NOTICE containing every required copyright attribution,
    license text, exception, and source-offer obligation; do not rely only on
    this summary or `package-lock.json`.
-3. Include Chroma's `LICENSE`, `NOTICE.md`, this inventory, Electron's license,
-   and the matching `LICENSES.chromium.html` in an accessible distribution
-   location, subject to a release/legal review.
+3. Preserve and reverify the currently packaged Chroma license/notice, this
+   inventory, Electron license, and matching `LICENSES.chromium.html` in an
+   accessible distribution location, subject to a release/legal review.
 4. Review fonts, icons, favicons, codecs, media/DRM modules, vendor keys,
    generated assets, and installer resources separately from npm packages.
 5. Rerun dependency vulnerability and license-policy scans after the lockfile

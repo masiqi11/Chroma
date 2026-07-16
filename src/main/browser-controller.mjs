@@ -782,6 +782,9 @@ export class BrowserController {
     });
   }
 
+  // `folderId` is intentionally tri-state: omitted preserves legacy inference
+  // from `targetId`, null targets the ungrouped list, and a string names an
+  // explicit folder (including an empty one with no target tab).
   reorderTab(id, targetId = null, position = "before", folderId = undefined) {
     if (!this.#reorderTabState(id, targetId, position, folderId)) return false;
     this.#commit();

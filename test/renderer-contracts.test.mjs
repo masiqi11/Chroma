@@ -65,6 +65,8 @@ test("ordinary pinned tabs render in an isolated neutral two-column grid", async
   );
   const grid = cssBlock(styles, ".pinned-grid");
   const active = cssBlock(styles, ".pinned-tab.is-active");
+  const ordinaryActive = cssBlock(styles, ".tab-item.is-active");
+  const essentialActive = cssBlock(styles, ".essential-item.is-active");
 
   assert.match(
     index,
@@ -85,6 +87,131 @@ test("ordinary pinned tabs render in an isolated neutral two-column grid", async
   assert.match(styles, /\.pinned-section\[hidden\][\s\S]*display:\s*none/);
   assert.match(active, /background:\s*rgba\(255, 255, 255, \.115\)/);
   assert.doesNotMatch(active, /accent|blue|#(?:00f|0000ff|3d45ff)/i);
+  assert.doesNotMatch(ordinaryActive, /accent|blue|#(?:00f|0000ff|3d45ff)/i);
+  assert.doesNotMatch(essentialActive, /accent|blue|#(?:00f|0000ff|3d45ff)/i);
+});
+
+test("folders keep an accessible empty drop surface and title menu", async () => {
+  const [shell, styles] = await Promise.all([
+    shellSourcePromise,
+    stylesSourcePromise,
+  ]);
+  const renderBody = sourceBetween(
+    shell,
+    "function renderTabs()",
+    "function renderWorkspaces()"
+  );
+
+  assert.doesNotMatch(renderBody, /if \(!childTabs\.length\) return ""/);
+  assert.match(renderBody, /class="folder\$\{folder\.expanded \? " is-expanded" : ""\}\$\{childTabs\.length \? "" : " is-empty"\}"/);
+  assert.match(renderBody, /class="folder-header"[^>]+aria-expanded="\$\{Boolean\(folder\.expanded\)\}"[^>]+aria-controls="\$\{folderTabsId\}"[^>]+aria-label=/);
+  assert.match(renderBody, /class="folder-menu-button"[^>]+data-action="folder-menu"[^>]+aria-haspopup="menu"[^>]+aria-expanded="false"/);
+  assert.match(renderBody, /class="folder-tabs" data-drop-zone="folder" data-folder-id=/);
+  assert.match(renderBody, /class=\"folder-empty-drop\"[^>]+>Drop tabs here</);
+  assert.match(renderBody, /class="folder-count" aria-hidden="true">\$\{childTabs\.length\}/);
+
+  const emptyTabs = cssBlock(styles, ".folder.is-empty.is-expanded .folder-tabs");
+  const emptyDrop = cssBlock(styles, ".folder-empty-drop");
+  assert.match(emptyTabs, /min-height:\s*36px/);
+  assert.match(emptyDrop, /height:\s*30px/);
+  assert.match(emptyDrop, /border:\s*1px dashed/);
+  assert.match(styles, /\.folder:not\(\.is-expanded\) \.folder-tabs\s*\{\s*display:\s*none/);
+  assert.match(styles, /\.folder-header:focus-visible/);
+  assert.match(styles, /\.folder-menu-button:focus-visible/);
+});
+
+test("folder actions rename safely and confirm container-only deletion", async () => {
+  const [index, shell, styles] = await Promise.all([
+    indexSourcePromise,
+    shellSourcePromise,
+    stylesSourcePromise,
+  ]);
+  const menuBody = sourceBetween(
+    shell,
+    "function showFolderMenu(folderId, anchor = null, point = null)",
+    "function showTabMenu(tabId, x, y)"
+  );
+  const promptBody = sourceBetween(
+    shell,
+    "function requestText(",
+    'window.addEventListener("beforeunload"'
+  );
+  const actionBody = sourceBetween(
+    shell,
+    "async function handleAction(action, element)",
+    'document.addEventListener("click"'
+  );
+
+  assert.match(index, /id="text-prompt-description" class="text-prompt-description" hidden/);
+  assert.match(menuBody, /role", "menu"/);
+  assert.match(menuBody, /role="menuitem" data-action="folder-menu-toggle"/);
+  assert.match(menuBody, /data-action="folder-rename"/);
+  assert.match(menuBody, /data-action="folder-delete"/);
+  assert.match(menuBody, /event\.key === "ArrowDown"/);
+  assert.match(menuBody, /event\.key === "Escape"/);
+  assert.match(promptBody, /Math\.max\(1, Math\.min\(80, maxLength\)\)/);
+  assert.match(promptBody, /textPromptInput\.value\.trim\(\)\.slice\(0, boundedMaxLength\)/);
+  assert.match(promptBody, /function requestConfirmation/);
+  assert.match(promptBody, /textPrompt\.setAttribute\("aria-describedby", "text-prompt-description"\)/);
+  assert.match(actionBody, /commands\.createFolder, \{ name, tabIds: \[\] \}/);
+  assert.match(actionBody, /commands\.renameFolder/);
+  assert.match(actionBody, /name:\s*name\.trim\(\)\.slice\(0, 80\)/);
+  assert.match(actionBody, /Deleting “\$\{folder\.name\}” only removes the folder/);
+  assert.match(actionBody, /will stay open and return to the ungrouped tab list/);
+  assert.match(actionBody, /commands\.deleteFolder/);
+  assert.match(styles, /\.folder-popover\s*\{/);
+  assert.match(styles, /\.folder-popover \.menu-item\.danger/);
+  assert.match(styles, /\.text-prompt-description\s*\{/);
+  assert.match(styles, /\.text-prompt \.prompt-button\.danger\s*\{/);
+});
+
+test("folder dragging sends an explicit destination and excludes library tabs", async () => {
+  const [shell, styles] = await Promise.all([
+    shellSourcePromise,
+    stylesSourcePromise,
+  ]);
+  const tabMenuBody = sourceBetween(
+    shell,
+    "function showTabMenu(tabId, x, y)",
+    "function renderAddressSuggestions()"
+  );
+  const pointerDownBody = sourceBetween(
+    shell,
+    'document.addEventListener("pointerdown", event => {\n  const row',
+    'document.addEventListener("pointermove", event => {\n  const session = tabPointerDrag'
+  );
+  const pointerMoveBody = sourceBetween(
+    shell,
+    'document.addEventListener("pointermove", event => {\n  const session = tabPointerDrag',
+    'document.addEventListener("pointerup", event => {\n  if (splitDividerDrag'
+  );
+  const pointerUpBody = sourceBetween(
+    shell,
+    'document.addEventListener("pointerup", event => {\n  const session = tabPointerDrag',
+    'document.addEventListener("pointercancel"'
+  );
+
+  assert.match(tabMenuBody, /const movable = !tab\.essential && !tab\.pinned/);
+  assert.match(tabMenuBody, /const folderAction = movable/);
+  assert.match(tabMenuBody, /const splitActions = movable/);
+  assert.match(pointerDownBody, /!tab\.essential && !tab\.pinned/);
+  assert.match(pointerMoveBody, /const targetFolderId = hitFolder\?\.dataset\.folderId \|\| null/);
+  assert.match(pointerMoveBody, /dragTargetFolderId = targetFolderId/);
+  assert.match(pointerMoveBody, /\?\.tabIds\.filter\(id => id !== session\.sourceId\)[\s\S]*\.at\(-1\) \|\| null/);
+  assert.match(pointerMoveBody, /row\.closest\("\.folder"\)\?\.dataset\.folderId \|\| null/);
+  assert.match(pointerUpBody, /const pointerFolderId = dragTargetFolderId/);
+  assert.ok((pointerUpBody.match(/folderId: pointerFolderId/g) || []).length >= 4);
+
+  const popoverLayer = cssBlock(styles, ".popover-layer");
+  const dragChip = cssBlock(styles, ".tab-drag-chip");
+  const content = cssBlock(styles, ".content-shell");
+  const dragSidebar = cssBlock(styles, "body.is-tab-dragging .sidebar");
+  const layerOf = block => Number(/z-index:\s*(\d+)/.exec(block)?.[1]);
+  assert.ok(layerOf(popoverLayer) > layerOf(content));
+  assert.ok(layerOf(dragChip) > layerOf(content));
+  assert.ok(layerOf(dragSidebar) > layerOf(content));
+  assert.match(shell, /api\.setChromeModalOpen\(true\)/);
+  assert.match(pointerMoveBody, /api\.setTabDragActive\(true\)/);
 });
 
 test("overlay tab dragging gives the sidebar priority over the page preview", async () => {

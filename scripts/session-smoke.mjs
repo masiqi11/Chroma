@@ -403,6 +403,18 @@ try {
     tabIds: [folderTabId],
   });
   assert.ok(folderId);
+  const emptyFolderId = await command(firstClient, "folder:create", {
+    name: "Empty Folder Draft",
+    tabIds: [],
+  });
+  assert.ok(emptyFolderId);
+  assert.equal(
+    await command(firstClient, "folder:rename", {
+      id: emptyFolderId,
+      name: "Restored Empty Folder",
+    }),
+    true
+  );
 
   const secondWorkspaceId = await command(firstClient, "workspace:create", {
     name: "Session Space",
@@ -449,6 +461,7 @@ try {
   const expected = await waitFor(async () => {
     const state = await getState(firstClient);
     const folder = findById(state.folders, folderId);
+    const emptyFolder = findById(state.folders, emptyFolderId);
     const split = findById(state.splitGroups, splitId);
     const workspace = findById(state.workspaces, originalWorkspaceId);
     return state.activeWorkspaceId === originalWorkspaceId &&
@@ -457,6 +470,9 @@ try {
       state.tabs.length === 4 &&
       folder?.name === "Restored Folder" &&
       folder?.expanded === true &&
+      emptyFolder?.name === "Restored Empty Folder" &&
+      emptyFolder?.expanded === true &&
+      emptyFolder?.tabIds?.length === 0 &&
       split?.direction === "row" &&
       split?.tabIds.join(",") === [originalTabId, splitPeerId].join(",") &&
       state.settings.sidebarWidth === 316 &&
@@ -476,6 +492,9 @@ try {
         state.activeTabId === expected.activeTabId &&
         state.tabs.length === expected.tabs.length &&
         findById(state.folders, folderId)?.tabIds?.[0] === folderTabId &&
+        findById(state.folders, emptyFolderId)?.name === "Restored Empty Folder" &&
+        findById(state.folders, emptyFolderId)?.expanded === true &&
+        findById(state.folders, emptyFolderId)?.tabIds?.length === 0 &&
         findById(state.splitGroups, splitId)?.tabIds?.join(",") ===
           [originalTabId, splitPeerId].join(",") &&
         state.settings?.sidebarWidth === 316 &&
@@ -521,6 +540,10 @@ try {
     findById(expected.folders, folderId)
   );
   assert.deepEqual(
+    findById(restoredState.folders, emptyFolderId),
+    findById(expected.folders, emptyFolderId)
+  );
+  assert.deepEqual(
     findById(restoredState.splitGroups, splitId),
     findById(expected.splitGroups, splitId)
   );
@@ -539,6 +562,60 @@ try {
   assert.equal(restoredDarkSnapshot.prefersLight, false);
   trace("restored session verified");
 
+  const combinedFolderId = await command(
+    secondLaunch.client,
+    "folder:create",
+    {
+      name: "Restored Folder Project",
+      tabIds: [folderTabId, originalTabId],
+    }
+  );
+  assert.ok(combinedFolderId);
+  const combinedFolderMemberIds = [folderTabId, originalTabId, splitPeerId];
+  const combinedFolderState = await waitFor(async () => {
+    const state = await getState(secondLaunch.client);
+    const originalFolder = findById(state.folders, folderId);
+    const emptyFolder = findById(state.folders, emptyFolderId);
+    const combinedFolder = findById(state.folders, combinedFolderId);
+    const split = findById(state.splitGroups, splitId);
+    return originalFolder?.tabIds?.length === 0 &&
+      originalFolder?.expanded === true &&
+      emptyFolder?.name === "Restored Empty Folder" &&
+      emptyFolder?.expanded === true &&
+      emptyFolder?.tabIds?.length === 0 &&
+      combinedFolder?.name === "Restored Folder Project" &&
+      combinedFolder?.expanded === true &&
+      JSON.stringify(combinedFolder.tabIds) ===
+        JSON.stringify(combinedFolderMemberIds) &&
+      JSON.stringify(split?.tabIds) ===
+        JSON.stringify([originalTabId, splitPeerId])
+      ? state
+      : false;
+  });
+  const splitTopologyBeforeFolderDelete = structuredClone(
+    findById(combinedFolderState.splitGroups, splitId)
+  );
+  const tabTopologyBeforeFolderDelete = combinedFolderState.tabs.map(tab => ({
+    id: tab.id,
+    workspaceId: tab.workspaceId,
+    url: tab.url,
+  }));
+  await waitFor(async () => {
+    try {
+      const state = await readPersistedState();
+      return findById(state.folders, folderId)?.tabIds?.length === 0 &&
+        findById(state.folders, emptyFolderId)?.tabIds?.length === 0 &&
+        JSON.stringify(findById(state.folders, combinedFolderId)?.tabIds) ===
+          JSON.stringify(combinedFolderMemberIds) &&
+        JSON.stringify(findById(state.splitGroups, splitId)) ===
+          JSON.stringify(splitTopologyBeforeFolderDelete);
+    } catch (error) {
+      if (error?.code === "ENOENT" || error instanceof SyntaxError) return false;
+      throw error;
+    }
+  });
+  trace("empty and populated folder topology persisted on second launch");
+
   const secondLightSnapshot = await setAndPersistAppearance(
     secondLaunch.client,
     lightAppearance
@@ -556,6 +633,64 @@ try {
   assert.equal(restoredLightSnapshot.prefersDark, false);
   assert.equal(restoredLightSnapshot.prefersLight, true);
   trace("light appearance restored on third launch");
+
+  const restoredFolderTopology = await waitFor(async () => {
+    const state = await getState(thirdLaunch.client);
+    const originalFolder = findById(state.folders, folderId);
+    const emptyFolder = findById(state.folders, emptyFolderId);
+    const combinedFolder = findById(state.folders, combinedFolderId);
+    const split = findById(state.splitGroups, splitId);
+    return originalFolder?.name === "Restored Folder" &&
+      originalFolder?.expanded === true &&
+      originalFolder?.tabIds?.length === 0 &&
+      emptyFolder?.name === "Restored Empty Folder" &&
+      emptyFolder?.expanded === true &&
+      emptyFolder?.tabIds?.length === 0 &&
+      combinedFolder?.name === "Restored Folder Project" &&
+      combinedFolder?.expanded === true &&
+      JSON.stringify(combinedFolder.tabIds) ===
+        JSON.stringify(combinedFolderMemberIds) &&
+      JSON.stringify(split) === JSON.stringify(splitTopologyBeforeFolderDelete) &&
+      JSON.stringify(state.tabs.map(tab => ({
+        id: tab.id,
+        workspaceId: tab.workspaceId,
+        url: tab.url,
+      }))) === JSON.stringify(tabTopologyBeforeFolderDelete)
+      ? state
+      : false;
+  });
+  assert.equal(
+    await command(thirdLaunch.client, "folder:delete", { id: folderId }),
+    true
+  );
+  await waitFor(async () => {
+    const state = await getState(thirdLaunch.client);
+    return !findById(state.folders, folderId) &&
+      JSON.stringify(findById(state.folders, combinedFolderId)?.tabIds) ===
+        JSON.stringify(combinedFolderMemberIds) &&
+      JSON.stringify(findById(state.splitGroups, splitId)) ===
+        JSON.stringify(splitTopologyBeforeFolderDelete) &&
+      JSON.stringify(state.tabs.map(tab => ({
+        id: tab.id,
+        workspaceId: tab.workspaceId,
+        url: tab.url,
+      }))) === JSON.stringify(tabTopologyBeforeFolderDelete);
+  });
+  await waitFor(async () => {
+    try {
+      const state = await readPersistedState();
+      return !findById(state.folders, folderId) &&
+        JSON.stringify(findById(state.folders, combinedFolderId)?.tabIds) ===
+          JSON.stringify(combinedFolderMemberIds) &&
+        JSON.stringify(findById(state.splitGroups, splitId)) ===
+          JSON.stringify(splitTopologyBeforeFolderDelete);
+    } catch (error) {
+      if (error?.code === "ENOENT" || error instanceof SyntaxError) return false;
+      throw error;
+    }
+  });
+  assert.ok(restoredFolderTopology);
+  trace("empty folder deletion persisted without changing tabs or split topology");
 
   await setAndPersistAppearance(thirdLaunch.client, systemAppearance);
   trace("system appearance persisted on third launch");
@@ -584,6 +719,30 @@ try {
     findById(finalState.workspaces, originalWorkspaceId)?.color,
     systemAppearance.workspaceColor
   );
+  assert.equal(findById(finalState.folders, folderId), undefined);
+  assert.deepEqual(findById(finalState.folders, emptyFolderId), {
+    ...findById(expected.folders, emptyFolderId),
+    tabIds: [],
+  });
+  assert.deepEqual(findById(finalState.folders, combinedFolderId), {
+    id: combinedFolderId,
+    workspaceId: originalWorkspaceId,
+    name: "Restored Folder Project",
+    tabIds: combinedFolderMemberIds,
+    expanded: true,
+  });
+  assert.deepEqual(
+    findById(finalState.splitGroups, splitId),
+    splitTopologyBeforeFolderDelete
+  );
+  assert.deepEqual(
+    finalState.tabs.map(tab => ({
+      id: tab.id,
+      workspaceId: tab.workspaceId,
+      url: tab.url,
+    })),
+    tabTopologyBeforeFolderDelete
+  );
   trace("system appearance restored on fourth launch");
 
   process.stdout.write(`${JSON.stringify({
@@ -591,8 +750,12 @@ try {
     externalUrlCreatesTab: true,
     restoredWorkspaces: expected.workspaces.length,
     restoredTabs: expected.tabs.length,
-    restoredFolders: expected.folders.length,
+    restoredFolders: finalState.folders.length,
     restoredSplits: expected.splitGroups.length,
+    restoredEmptyFolder: true,
+    restoredFolderMembership: true,
+    removedFolderStayedDeleted: true,
+    folderDeletePreservedTabAndSplitTopology: true,
     restoredSidebar: true,
     appearanceSchema: 6,
     restoredAppearanceThemes: ["dark", "light", "system"],

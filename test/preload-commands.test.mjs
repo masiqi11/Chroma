@@ -30,6 +30,20 @@ test("appearance updates cross only the shared allow-listed command boundary", a
   assert.match(preloadSource, /["']settings:set-appearance["']/);
 });
 
+test("folder lifecycle commands cross the shared allow-listed boundary", async () => {
+  const preloadSource = await readFile(
+    new URL("../src/preload/shell-preload.cjs", import.meta.url),
+    "utf8"
+  );
+
+  assert.equal(commands.renameFolder, "folder:rename");
+  assert.equal(commands.deleteFolder, "folder:delete");
+  for (const command of [commands.renameFolder, commands.deleteFolder]) {
+    assert.equal(commandNames.has(command), true);
+    assert.match(preloadSource, new RegExp(`["']${command}["']`));
+  }
+});
+
 test("preload bridge exposes shell-owned modal notification channels", async () => {
   const preloadSource = await readFile(
     new URL("../src/preload/shell-preload.cjs", import.meta.url),

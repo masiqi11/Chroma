@@ -21,8 +21,8 @@ or endorsed by The Browser Company or the Zen Browser project.
   possible direct-Chromium host
 - [`DESIGN.md`](DESIGN.md): implemented host and interaction decisions
 - [`docs/PARITY.md`](docs/PARITY.md): capability status and remaining work
-- [`TESTING.md`](TESTING.md): automated evidence, package/visual gates, and the
-  outstanding unlocked-GUI acceptance
+- [`TESTING.md`](TESTING.md): automated evidence, package/visual gates, partial
+  packaged-GUI acceptance, and the remaining manual gesture checklist
 - [`UI_COMPARISON.md`](UI_COMPARISON.md): Chroma self-regression baselines and
   the limits of comparison with external browsers
 - [`docs/HISTORY-SPEC.md`](docs/HISTORY-SPEC.md): local history contract
@@ -102,7 +102,7 @@ directory under the application name `Chroma`. Browser state is persisted in
 
 ## Test
 
-The complete gate definitions, current 125-test evidence, and manual acceptance
+The complete gate definitions, current automated evidence, and manual acceptance
 boundary are recorded in [`TESTING.md`](TESTING.md).
 
 ```bash
@@ -165,18 +165,21 @@ architecture) without running the package checks. `package-smoke` rebuilds the
 directory target, verifies the bundle identifier and the explicit ASAR file
 allow-list, rejects leaked tests/scripts/artifacts/profile state, launches the
 packaged executable, and proves that the preload bridge reaches live browser
-state without fatal startup output. Its machine-readable result is written to
+state without fatal startup output. It also verifies the packaged Chroma icon
+and the five directly readable project/Electron/Chromium license resources.
+Its machine-readable result is written to
 `artifacts/package/package-smoke.json`.
 
 `npm run package:mac` creates local DMG and ZIP artifacts. All three package
 scripts disable certificate auto-discovery, and `electron-builder.yml`
 explicitly sets `identity: null`; these outputs are **unsigned, unnotarized,
-and not release-ready**. The current bundle also deliberately uses Electron's
-default icon because no original Chroma application icon has been supplied.
-Production distribution still requires an original icon plus a separate
-Developer ID signing, hardened-runtime, entitlements, notarization, update,
-release-channel configuration, and a complete third-party notice payload. The
-current `.app` contains no project/Electron/Chromium license-notice files; see
+and not release-ready**. The current bundle uses the original checked-in
+`build/icon.icns` and contains Chroma's license/notice, this dependency
+inventory, Electron's license, and Chromium's generated credits under
+`Contents/Resources/licenses/`. Production distribution still requires a
+separate Developer ID signing, hardened-runtime, entitlements, notarization,
+update/release-channel configuration, a frozen-artifact SBOM, and legal review
+of the complete notice payload; see
 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
 
 ## Architecture

@@ -87,7 +87,8 @@ function arraysEqual(left, right) {
  * first surviving folder or split group owns it. Every split group is repaired
  * into one folder container (anchored by its first pane) or into the ungrouped
  * container. Folder and split IDs share one namespace so an ID cannot identify
- * two topology entities.
+ * two topology entities. Pinned and Essential tabs cannot belong to either
+ * container type, while an explicitly empty folder remains a durable entity.
  *
  * @param {{workspaces?: unknown[], tabs?: unknown[], folders?: unknown[], splitGroups?: unknown[]}} topology
  * @param {() => string} idFactory

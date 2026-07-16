@@ -38,6 +38,7 @@ const resizer = document.querySelector("#sidebar-resizer");
 const textPrompt = document.querySelector("#text-prompt");
 const textPromptForm = document.querySelector("#text-prompt-form");
 const textPromptTitle = document.querySelector("#text-prompt-title");
+const textPromptDescription = document.querySelector("#text-prompt-description");
 const textPromptLabel = document.querySelector("#text-prompt-label");
 const textPromptInput = document.querySelector("#text-prompt-input");
 const textPromptCancel = document.querySelector("#text-prompt-cancel");
@@ -87,6 +88,7 @@ let dragSplitTargetId = null;
 let dragSplitEdge = "right";
 let dragIntent = "none";
 let dragTargetId = null;
+let dragTargetFolderId = null;
 let dragPlacement = "before";
 let suppressTabClick = false;
 let addressWindowDrag = null;
@@ -133,6 +135,7 @@ const iconPaths = Object.freeze({
   pause: '<path d="M8 5v14M16 5v14"/>',
   play: '<path d="m8 5 11 7-11 7z"/>',
   folder: '<path d="M3 7.5h7l2 2h9v9.5H3z"/><path d="M3 7.5V5h7l2 2"/>',
+  more: '<circle cx="5" cy="12" r="1" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1" fill="currentColor" stroke="none"/><circle cx="19" cy="12" r="1" fill="currentColor" stroke="none"/>',
   chevron: '<path d="m9 7 5 5-5 5"/>',
   collapse: '<path d="M4 5h16v14H4z"/><path d="M9 5v14"/><path d="m16 9-3 3 3 3"/>',
   expand: '<path d="M4 5h16v14H4z"/><path d="M9 5v14"/><path d="m13 9 3 3-3 3"/>',
@@ -924,14 +927,21 @@ function renderTabs() {
   const folderMarkup = folders
     .map(folder => {
       const childTabs = folder.tabIds.map(id => tabs.find(tab => tab.id === id)).filter(Boolean);
-      if (!childTabs.length) return "";
-      return `<section class="folder${folder.expanded ? " is-expanded" : ""}" data-folder-id="${escapeHtml(folder.id)}">
-        <button class="folder-header" data-action="toggle-folder" data-folder-id="${escapeHtml(folder.id)}">
-          ${icon(folder.expanded ? "folder" : "folder")}
-          <span class="folder-name">${escapeHtml(folder.name)}</span>
-          <span class="folder-count">${childTabs.length}</span>
-        </button>
-        <div class="folder-tabs">${renderTabSequence(childTabs, renderedSplitGroups)}</div>
+      const folderId = escapeHtml(folder.id);
+      const folderName = escapeHtml(folder.name);
+      const folderTabsId = `folder-tabs-${folderId}`;
+      const countLabel = `${childTabs.length} ${childTabs.length === 1 ? "tab" : "tabs"}`;
+      return `<section class="folder${folder.expanded ? " is-expanded" : ""}${childTabs.length ? "" : " is-empty"}" data-folder-id="${folderId}" role="group" aria-label="${folderName} folder">
+        <div class="folder-heading">
+          <button class="folder-header" type="button" data-action="toggle-folder" data-folder-id="${folderId}" aria-expanded="${Boolean(folder.expanded)}" aria-controls="${folderTabsId}" aria-label="${folder.expanded ? "Collapse" : "Expand"} ${folderName} folder, ${countLabel}">
+            <span class="folder-disclosure">${icon("chevron")}</span>
+            <span class="folder-glyph">${icon("folder")}</span>
+            <span class="folder-name">${folderName}</span>
+            <span class="folder-count" aria-hidden="true">${childTabs.length}</span>
+          </button>
+          <button class="folder-menu-button" type="button" data-action="folder-menu" data-folder-id="${folderId}" title="Folder actions" aria-label="Open menu for ${folderName} folder" aria-haspopup="menu" aria-expanded="false">${icon("more")}</button>
+        </div>
+        <div id="${folderTabsId}" class="folder-tabs" data-drop-zone="folder" data-folder-id="${folderId}" role="group" aria-label="${folderName} tabs">${childTabs.length ? renderTabSequence(childTabs, renderedSplitGroups) : '<div class="folder-empty-drop" aria-hidden="true">Drop tabs here</div>'}</div>
       </section>`;
     })
     .join("");
@@ -1113,12 +1123,23 @@ async function executeCommandPaletteItem(index = commandPaletteIndex) {
   }
 }
 
-function requestText({ title, label, value = "", submitLabel = "Save" }) {
+function requestText({ title, label, value = "", submitLabel = "Save", maxLength = 80 }) {
   if (textPrompt.open) return Promise.resolve(null);
+  const boundedMaxLength = Number.isInteger(maxLength)
+    ? Math.max(1, Math.min(80, maxLength))
+    : 80;
   textPromptTitle.textContent = title;
+  textPromptDescription.textContent = "";
+  textPromptDescription.hidden = true;
+  textPrompt.removeAttribute("aria-describedby");
   textPromptLabel.textContent = label;
-  textPromptInput.value = value;
+  textPromptLabel.hidden = false;
+  textPromptInput.hidden = false;
+  textPromptInput.required = true;
+  textPromptInput.maxLength = boundedMaxLength;
+  textPromptInput.value = String(value).slice(0, boundedMaxLength);
   textPromptSubmit.textContent = submitLabel;
+  textPromptSubmit.classList.remove("danger");
   api.setChromeModalOpen(true);
 
   return new Promise(resolve => {
@@ -1134,7 +1155,7 @@ function requestText({ title, label, value = "", submitLabel = "Save" }) {
     };
     const onSubmit = event => {
       event.preventDefault();
-      const result = textPromptInput.value.trim();
+      const result = textPromptInput.value.trim().slice(0, boundedMaxLength);
       if (result) finish(result);
     };
     const onCancel = event => {
@@ -1157,6 +1178,55 @@ function requestText({ title, label, value = "", submitLabel = "Save" }) {
   });
 }
 
+function requestConfirmation({ title, message, confirmLabel = "Confirm" }) {
+  if (textPrompt.open) return Promise.resolve(false);
+  textPromptTitle.textContent = title;
+  textPromptDescription.textContent = message;
+  textPromptDescription.hidden = false;
+  textPrompt.setAttribute("aria-describedby", "text-prompt-description");
+  textPromptLabel.hidden = true;
+  textPromptInput.hidden = true;
+  textPromptInput.required = false;
+  textPromptSubmit.textContent = confirmLabel;
+  textPromptSubmit.classList.add("danger");
+  api.setChromeModalOpen(true);
+
+  return new Promise(resolve => {
+    const finish = confirmed => {
+      textPromptForm.removeEventListener("submit", onSubmit);
+      textPromptCancel.removeEventListener("click", onCancel);
+      textPrompt.removeEventListener("cancel", onCancel);
+      textPrompt.removeEventListener("click", onBackdropClick);
+      if (textPrompt.open) textPrompt.close();
+      textPromptSubmit.classList.remove("danger");
+      textPromptLabel.hidden = false;
+      textPromptInput.hidden = false;
+      textPromptInput.required = true;
+      api.setChromeModalOpen(false);
+      closeSidebarOverlaySoon();
+      resolve(confirmed);
+    };
+    const onSubmit = event => {
+      event.preventDefault();
+      finish(true);
+    };
+    const onCancel = event => {
+      event.preventDefault();
+      finish(false);
+    };
+    const onBackdropClick = event => {
+      if (event.target === textPrompt) finish(false);
+    };
+
+    textPromptForm.addEventListener("submit", onSubmit);
+    textPromptCancel.addEventListener("click", onCancel);
+    textPrompt.addEventListener("cancel", onCancel);
+    textPrompt.addEventListener("click", onBackdropClick);
+    textPrompt.showModal();
+    requestAnimationFrame(() => textPromptSubmit.focus());
+  });
+}
+
 window.addEventListener("beforeunload", () => {
   api?.setChromeModalOpen(false);
   api?.setTabDragActive(false);
@@ -1167,6 +1237,9 @@ function closePopover({ keepModalOpen = false } = {}) {
   const wasOpen = popoverLayer.childElementCount > 0;
   popoverLayer.replaceChildren();
   appearanceButton?.setAttribute("aria-expanded", "false");
+  document.querySelectorAll('.folder-menu-button[aria-expanded="true"]').forEach(button => {
+    button.setAttribute("aria-expanded", "false");
+  });
   contextTabId = null;
   if (wasOpen && !keepModalOpen) api.setChromeModalOpen(false);
   if (wasOpen && !keepModalOpen) closeSidebarOverlaySoon();
@@ -1370,13 +1443,86 @@ function formatDownloadBytes(value) {
   return `${amount >= 10 || power === 0 ? Math.round(amount) : amount.toFixed(1)} ${units[power]}`;
 }
 
+function showFolderMenu(folderId, anchor = null, point = null) {
+  const folder = state.folders.find(item =>
+    item.id === folderId && item.workspaceId === state.activeWorkspaceId
+  );
+  if (!folder) return;
+  const openMenu = popoverLayer.querySelector(
+    `[data-popover-kind="folder"][data-folder-id="${CSS.escape(folder.id)}"]`
+  );
+  if (openMenu) {
+    closePopover();
+    anchor?.focus({ preventScroll: true });
+    return;
+  }
+
+  closePopover();
+  const id = escapeHtml(folder.id);
+  const name = escapeHtml(folder.name);
+  const popover = document.createElement("div");
+  popover.className = "popover folder-popover";
+  popover.dataset.popoverKind = "folder";
+  popover.dataset.folderId = folder.id;
+  popover.setAttribute("role", "menu");
+  popover.setAttribute("aria-label", `${folder.name} folder actions`);
+  replaceTrustedMarkup(popover, `<div class="popover-title">${name}</div>
+    <button class="menu-item" type="button" role="menuitem" data-action="folder-menu-toggle" data-folder-id="${id}">${icon("chevron")}<span>${folder.expanded ? "Collapse folder" : "Expand folder"}</span></button>
+    <button class="menu-item" type="button" role="menuitem" data-action="folder-rename" data-folder-id="${id}">${icon("tools")}<span>Rename folder</span></button>
+    <div class="menu-separator"></div>
+    <button class="menu-item danger" type="button" role="menuitem" data-action="folder-delete" data-folder-id="${id}" aria-label="Delete ${name} folder">${icon("trash")}<span>Delete folder</span></button>`);
+  const anchorRect = anchor?.getBoundingClientRect?.() || {
+    left: point?.x || 8,
+    right: point?.x || 8,
+    top: point?.y || 8,
+    bottom: point?.y || 8,
+  };
+  positionPopover(popover, anchorRect);
+  presentPopover(popover);
+  anchor?.setAttribute("aria-expanded", "true");
+
+  popover.addEventListener("keydown", event => {
+    const items = [...popover.querySelectorAll('[role="menuitem"]')];
+    const currentIndex = items.indexOf(document.activeElement);
+    let nextIndex = -1;
+    if (event.key === "ArrowDown") nextIndex = (currentIndex + 1) % items.length;
+    else if (event.key === "ArrowUp") nextIndex = (currentIndex - 1 + items.length) % items.length;
+    else if (event.key === "Home") nextIndex = 0;
+    else if (event.key === "End") nextIndex = items.length - 1;
+    else if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      closePopover();
+      anchor?.focus({ preventScroll: true });
+      return;
+    } else {
+      return;
+    }
+    event.preventDefault();
+    items[nextIndex]?.focus();
+  });
+  requestAnimationFrame(() => popover.querySelector('[role="menuitem"]')?.focus());
+}
+
 function showTabMenu(tabId, x, y) {
   const tab = state.tabs.find(item => item.id === tabId);
   if (!tab) return;
   const group = splitForTab(tabId);
+  const movable = !tab.essential && !tab.pinned;
+  const pinAction = tab.essential
+    ? ""
+    : `<button class="menu-item" data-action="context-pin">${icon("pin")}<span>${tab.pinned ? "Unpin tab" : "Pin tab"}</span></button>`;
+  const folderAction = movable
+    ? `<button class="menu-item" data-action="context-folder">${icon("folder")}<span>Move to new folder</span></button>`
+    : "";
+  const splitActions = movable
+    ? group
+      ? `<button class="menu-item" data-action="context-unsplit">${icon("grid")}<span>Exit split view</span></button>`
+      : `<button class="menu-item" data-action="context-split-row">${icon("split")}<span>Split side by side</span></button><button class="menu-item" data-action="context-split-column">${icon("splitColumn")}<span>Split top and bottom</span></button>`
+    : "";
   const popover = document.createElement("div");
   popover.className = "popover";
-  replaceTrustedMarkup(popover, `${tab.essential ? "" : `<button class="menu-item" data-action="context-pin">${icon("pin")}<span>${tab.pinned ? "Unpin tab" : "Pin tab"}</span></button>`}<button class="menu-item" data-action="context-essential">${icon("pin")}<span>${tab.essential ? "Remove from Essentials" : "Add to Essentials"}</span></button><button class="menu-item" data-action="context-mute">${icon(tab.muted ? "volume" : "muted")}<span>${tab.muted ? "Unmute tab" : "Mute tab"}</span></button><button class="menu-item" data-action="context-folder">${icon("folder")}<span>Move to new folder</span></button><div class="menu-separator"></div>${group ? `<button class="menu-item" data-action="context-unsplit">${icon("grid")}<span>Exit split view</span></button>` : `<button class="menu-item" data-action="context-split-row">${icon("split")}<span>Split side by side</span></button><button class="menu-item" data-action="context-split-column">${icon("splitColumn")}<span>Split top and bottom</span></button>`}<button class="menu-item" data-action="context-devtools">${icon("tools")}<span>Developer tools</span></button><div class="menu-separator"></div><button class="menu-item" data-action="context-close">${icon("close")}<span>Close tab</span></button>`);
+  replaceTrustedMarkup(popover, `${pinAction}<button class="menu-item" data-action="context-essential">${icon("pin")}<span>${tab.essential ? "Remove from Essentials" : "Add to Essentials"}</span></button><button class="menu-item" data-action="context-mute">${icon(tab.muted ? "volume" : "muted")}<span>${tab.muted ? "Unmute tab" : "Mute tab"}</span></button>${folderAction}<div class="menu-separator"></div>${splitActions}<button class="menu-item" data-action="context-devtools">${icon("tools")}<span>Developer tools</span></button><div class="menu-separator"></div><button class="menu-item" data-action="context-close">${icon("close")}<span>Close tab</span></button>`);
   const fakeRect = { left: x, right: x, top: y, bottom: y };
   positionPopover(popover, fakeRect);
   presentPopover(popover, tabId);
@@ -1714,13 +1860,57 @@ async function handleAction(action, element) {
         label: "Folder name",
         value: "Folder",
         submitLabel: "Create",
+        maxLength: 80,
       });
-      if (name) await runCommand(commands.createFolder, { name });
+      if (name) await runCommand(commands.createFolder, { name, tabIds: [] });
       break;
     }
     case "toggle-folder":
       await runCommand(commands.toggleFolder, { id: element.dataset.folderId });
       break;
+    case "folder-menu":
+      showFolderMenu(element.dataset.folderId, element);
+      break;
+    case "folder-menu-toggle": {
+      const folderId = element.dataset.folderId;
+      closePopover();
+      await runCommand(commands.toggleFolder, { id: folderId });
+      break;
+    }
+    case "folder-rename": {
+      const folderId = element.dataset.folderId;
+      const folder = state.folders.find(item => item.id === folderId);
+      closePopover({ keepModalOpen: Boolean(folder) });
+      if (!folder) break;
+      const name = await requestText({
+        title: "Rename folder",
+        label: "Folder name",
+        value: folder.name,
+        submitLabel: "Rename",
+        maxLength: 80,
+      });
+      if (name) {
+        await runCommand(commands.renameFolder, {
+          id: folder.id,
+          name: name.trim().slice(0, 80),
+        });
+      }
+      break;
+    }
+    case "folder-delete": {
+      const folderId = element.dataset.folderId;
+      const folder = state.folders.find(item => item.id === folderId);
+      closePopover({ keepModalOpen: Boolean(folder) });
+      if (!folder) break;
+      const tabLabel = `${folder.tabIds.length} ${folder.tabIds.length === 1 ? "tab" : "tabs"}`;
+      const confirmed = await requestConfirmation({
+        title: "Delete folder?",
+        message: `Deleting “${folder.name}” only removes the folder. Its ${tabLabel} will stay open and return to the ungrouped tab list.`,
+        confirmLabel: "Delete folder",
+      });
+      if (confirmed) await runCommand(commands.deleteFolder, { id: folder.id });
+      break;
+    }
     case "toggle-sidebar":
       closePopover();
       await runCommand(commands.toggleSidebar);
@@ -1789,6 +1979,11 @@ async function handleAction(action, element) {
       break;
     case "context-folder": {
       const folderTabId = contextTabId;
+      const folderTab = state.tabs.find(tab => tab.id === folderTabId);
+      if (!folderTab || folderTab.essential || folderTab.pinned) {
+        closePopover();
+        break;
+      }
       closePopover({ keepModalOpen: true });
       const name = await requestText({
         title: "Move to new folder",
@@ -1802,16 +1997,28 @@ async function handleAction(action, element) {
       break;
     }
     case "context-split-row":
-    case "context-split-column":
+    case "context-split-column": {
+      const splitTab = state.tabs.find(tab => tab.id === contextTabId);
+      if (!splitTab || splitTab.essential || splitTab.pinned) {
+        closePopover();
+        break;
+      }
       if (contextTabId !== state.activeTabId) await runCommand(commands.selectTab, { id: contextTabId });
       await runCommand(commands.splitActive, { direction: action.endsWith("column") ? "column" : "row" });
       closePopover();
       break;
-    case "context-unsplit":
+    }
+    case "context-unsplit": {
+      const splitTab = state.tabs.find(tab => tab.id === contextTabId);
+      if (!splitTab || splitTab.essential || splitTab.pinned) {
+        closePopover();
+        break;
+      }
       if (contextTabId !== state.activeTabId) await runCommand(commands.selectTab, { id: contextTabId });
       await runCommand(commands.unsplitActive);
       closePopover();
       break;
+    }
     case "context-devtools":
       await runCommand(commands.openDevTools, { id: contextTabId });
       closePopover();
@@ -1841,15 +2048,24 @@ document.addEventListener("click", event => {
 });
 
 document.addEventListener("dblclick", event => {
-  if (event.target.closest(".tab-item")) return;
+  if (event.target.closest(".tab-item, .folder")) return;
   if (event.target.closest("#tabs-scroll")) void runCommand(commands.createTab);
 });
 
 document.addEventListener("contextmenu", event => {
   const row = event.target.closest(".tab-row, .pinned-tab");
-  if (!row) return;
+  if (row) {
+    event.preventDefault();
+    showTabMenu(row.dataset.tabId, event.clientX, event.clientY);
+    return;
+  }
+  const folder = event.target.closest(".folder");
+  if (!folder) return;
   event.preventDefault();
-  showTabMenu(row.dataset.tabId, event.clientX, event.clientY);
+  showFolderMenu(folder.dataset.folderId, null, {
+    x: event.clientX,
+    y: event.clientY,
+  });
 });
 
 document.addEventListener("error", event => {
@@ -1917,6 +2133,7 @@ function finishTabPointerDrag() {
   dragSplitTargetId = null;
   dragIntent = "none";
   dragTargetId = null;
+  dragTargetFolderId = null;
   dragPlacement = "before";
   splitDropOverlay.hidden = true;
   tabDragChip.hidden = true;
@@ -2150,11 +2367,12 @@ document.addEventListener("pointerdown", event => {
     startY: event.clientY,
     started: false,
   };
-  dragSplitTargetId = state.activeTabId === sourceId
-    ? [...tabsForWorkspace()]
-        .filter(tab => tab.id !== sourceId)
-        .sort((left, right) => right.lastActiveAt - left.lastActiveAt)[0]?.id || null
-    : state.activeTabId;
+  const splitCandidates = tabsForWorkspace()
+    .filter(tab => tab.id !== sourceId && !tab.essential && !tab.pinned)
+    .sort((left, right) => right.lastActiveAt - left.lastActiveAt);
+  dragSplitTargetId = splitCandidates.some(tab => tab.id === state.activeTabId)
+    ? state.activeTabId
+    : splitCandidates[0]?.id || null;
 });
 
 document.addEventListener("pointermove", event => {
@@ -2208,6 +2426,7 @@ document.addEventListener("pointermove", event => {
   if (overViewport && session.sourceGroupId) {
     clearTabDropTarget();
     dragTargetId = null;
+    dragTargetFolderId = null;
     dragPlacement = "before";
     splitDropOverlay.hidden = true;
     const sourceGroup = document.querySelector(
@@ -2220,6 +2439,7 @@ document.addEventListener("pointermove", event => {
   if (overViewport && dragSplitTargetId) {
     clearTabDropTarget();
     dragTargetId = dragSplitTargetId;
+    dragTargetFolderId = null;
     dragPlacement = "before";
     splitDropOverlay.hidden = false;
     updateSplitDropPreview(event.clientX, event.clientY);
@@ -2237,6 +2457,7 @@ document.addEventListener("pointermove", event => {
     targetFolderId !== session.sourceFolderId
   ) {
     clearTabDropTarget();
+    dragTargetFolderId = targetFolderId;
     const hitRow = hitElement?.closest?.(".tab-row") || null;
     let targetId = hitRow?.dataset.tabId || null;
     let placement = "after";
@@ -2278,6 +2499,7 @@ document.addEventListener("pointermove", event => {
     if (!targetSlot || targetSlot.id === session.sourceId) {
       clearTabDropTarget();
       dragTargetId = null;
+      dragTargetFolderId = null;
       updateTabDragChip(event, "move", "Move split tab");
       return;
     }
@@ -2315,6 +2537,7 @@ document.addEventListener("pointermove", event => {
     }
     dragTargetRow = targetSlot.row;
     dragTargetId = targetSlot.id;
+    dragTargetFolderId = targetSlot.row.closest(".folder")?.dataset.folderId || null;
     dragPlacement = "after";
     updateTabDragChip(event, "split-swap", "Swap split tabs");
     return;
@@ -2323,6 +2546,7 @@ document.addEventListener("pointermove", event => {
   if (!row || row.dataset.tabId === session.sourceId) {
     clearTabDropTarget();
     dragTargetId = null;
+    dragTargetFolderId = null;
     dragPlacement = "before";
     const sourceGroup = session.sourceGroupId
       ? document.querySelector(`[data-split-group-id="${CSS.escape(session.sourceGroupId)}"]`)
@@ -2342,6 +2566,7 @@ document.addEventListener("pointermove", event => {
   if (dragTargetRow !== row) clearTabDropTarget();
   dragTargetRow = row;
   dragTargetId = row.dataset.tabId;
+  dragTargetFolderId = row.closest(".folder")?.dataset.folderId || null;
   const bounds = row.getBoundingClientRect();
   const targetGroup = splitForTab(dragTargetId);
   const sameGroup = Boolean(
@@ -2402,6 +2627,7 @@ document.addEventListener("pointerup", event => {
   const splitTargetId = dropIntent === "split-page" ? dragSplitTargetId : null;
   const splitEdge = dragSplitEdge;
   const pointerTargetId = dragTargetId;
+  const pointerFolderId = dragTargetFolderId;
   const pointerPlacement = dragPlacement;
   if (wasDragging) {
     event.preventDefault();
@@ -2436,6 +2662,7 @@ document.addEventListener("pointerup", event => {
       id: session.sourceId,
       targetId: pointerTargetId,
       position: pointerPlacement,
+      folderId: pointerFolderId,
     });
   } else if (dropIntent === "detach-folder") {
     void runCommand(commands.detachSplitTab, {
@@ -2443,12 +2670,14 @@ document.addEventListener("pointerup", event => {
       targetId: pointerTargetId,
       position: pointerPlacement,
       moveToEnd: !pointerTargetId,
+      folderId: pointerFolderId,
     });
   } else if (dropIntent === "folder-move") {
     void runCommand(commands.reorderTab, {
       id: session.sourceId,
       targetId: pointerTargetId,
       position: pointerPlacement,
+      folderId: pointerFolderId,
     });
   } else if (dropIntent === "detach") {
     void runCommand(commands.detachSplitTab, { id: session.sourceId });
@@ -2461,6 +2690,7 @@ document.addEventListener("pointerup", event => {
       id: session.sourceId,
       targetId: pointerTargetId,
       position: pointerPlacement,
+      folderId: pointerFolderId,
     });
   }
 });

@@ -294,18 +294,20 @@ cross their real bundle boundaries without fatal startup output.
 The checked-in macOS target is deliberately local and unsigned:
 `CSC_IDENTITY_AUTO_DISCOVERY=false`, `identity: null`, hardened runtime off,
 and notarization off. It creates directory, DMG, and ZIP targets whose names
-include `unsigned`. No custom icon is configured, so Electron's default icon
-is expected and remains a visible release TODO. A production build must use a
-separate reviewed override that enables Developer ID signing, hardened runtime,
-entitlements, notarization, an original Chroma icon, update metadata, and
-release provenance; passing the local package smoke is not evidence that those
-distribution controls exist.
+include `unsigned`. The macOS target configures the original checked-in
+`build/icon.icns`; package smoke verifies the bundled `icon.icns` against its
+source SHA-256 and requires `branded: true`. A production build must still use
+a separate reviewed override that enables Developer ID signing, hardened
+runtime, entitlements, notarization, update metadata, and release provenance;
+passing the local package smoke is not evidence that those distribution
+controls exist.
 
-The inspected local `.app` and its ASAR contain no license or third-party notice
-files: the runtime allow-list excludes repository documentation and no separate
-resource step copies Electron/Chromium notices. That is acceptable only for this
-non-distribution startup artifact and is a blocker for any public release
-package.
+`extraResources` keeps five license resources directly readable outside ASAR:
+Chroma's license and notice, `THIRD_PARTY_NOTICES.md`, Electron's license, and
+the matching Chromium-generated credits file. Package smoke requires all five.
+This is a concrete improvement over a bare startup artifact, but it is not a
+frozen-artifact SBOM or a legal determination that every shipped component,
+asset, exception, and attribution has been covered.
 
 Packaging startup evidence is documented in [`TESTING.md`](TESTING.md); the
 dependency-license snapshot and public-release notice work are tracked in
@@ -313,8 +315,9 @@ dependency-license snapshot and public-release notice work are tracked in
 
 ## Verification strategy
 
-Commands, current results, and the blocked unlocked-GUI acceptance are recorded
-in [`TESTING.md`](TESTING.md). Exact visual baseline and diff paths are listed in
+Commands, current results, the partial packaged-GUI acceptance, and the
+remaining real-pointer/keyboard checklist are recorded in
+[`TESTING.md`](TESTING.md). Exact visual baseline and diff paths are listed in
 [`UI_COMPARISON.md`](UI_COMPARISON.md).
 
 - `npm run check` is the fast static/unit gate. It covers ratio-tree geometry,
@@ -373,8 +376,10 @@ in [`TESTING.md`](TESTING.md). Exact visual baseline and diff paths are listed i
 
 - 2026-07-16: Added an explicit electron-builder runtime allow-list and a
   reproducible unsigned macOS package smoke that inspects ASAR contents and
-  launches the packaged executable through the preload bridge. Release signing,
-  notarization, updater metadata, and a custom Chroma icon remain separate work.
+  launches the packaged executable through the preload bridge. Added an
+  original Chroma icon plus directly readable Chroma, Electron, and Chromium
+  notice resources; release signing, notarization, updater metadata, SBOM, and
+  legal review remain separate work.
 
 - 2026-07-16: Bumped profile persistence to schema 6, added validated
   system/light/dark Appearance preferences, active-Space color editing, and a

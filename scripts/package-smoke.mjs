@@ -23,6 +23,7 @@ const requiredEntries = [
   "src/main/history-service.mjs",
   "src/main/internal-pages.mjs",
   "src/main/process-output.mjs",
+  "src/main/startup-policy.mjs",
   "src/main/state-store.mjs",
   "src/preload/shell-preload.cjs",
   "src/renderer/index.html",
@@ -34,6 +35,8 @@ const requiredEntries = [
   "src/shared/layout.mjs",
   "src/shared/model.mjs",
   "src/shared/navigation.mjs",
+  "src/shared/page-zoom.mjs",
+  "src/shared/search-providers.mjs",
   "src/shared/split-ratios.mjs",
   "src/shared/state-invariants.mjs",
 ];

@@ -4,6 +4,12 @@ export const STARTUP_MODES = Object.freeze({
   SPECIFIC_PAGES: "specific-pages",
 });
 
+export const STARTUP_ACTION_TYPES = Object.freeze({
+  START_FRESH_SESSION: "start-fresh-session",
+  RESTORE_SESSION: "restore-session",
+  OPEN_URL: "open-url",
+});
+
 export const DEFAULT_STARTUP_MODE = STARTUP_MODES.CONTINUE;
 export const STARTUP_PAGE_LIMIT = 16;
 export const STARTUP_URL_MAX_LENGTH = 8_192;
@@ -75,7 +81,9 @@ export function sanitizeStartupPreference(candidate) {
 /**
  * External startup targets are transient, so their fragments remain useful for
  * navigation. They are not de-duplicated or capped: every valid OS-delivered
- * target must become one action in the same order in which it arrived.
+ * target must become one action in the same order in which it arrived. The
+ * eventual side-effecting caller must consume those actions with FIFO
+ * backpressure rather than applying the persisted-page cap to system events.
  */
 export function sanitizeExternalStartupUrls(values) {
   if (!Array.isArray(values)) return [];
@@ -90,45 +98,61 @@ export function sanitizeExternalStartupUrls(values) {
 function preferredStartupActions(preference, cleanShutdown) {
   if (preference.mode === STARTUP_MODES.CONTINUE) {
     return cleanShutdown === true
-      ? [{ type: "restore-session", source: "preference" }]
-      : [{
-          type: "open-url",
-          source: "fallback",
-          url: STARTUP_NEW_TAB_URL,
-        }];
+      ? [{ type: STARTUP_ACTION_TYPES.RESTORE_SESSION, source: "preference" }]
+      : [{ type: STARTUP_ACTION_TYPES.START_FRESH_SESSION, source: "policy" }];
   }
 
   if (preference.mode === STARTUP_MODES.SPECIFIC_PAGES) {
-    return preference.pages.map(url => ({
-      type: "open-url",
-      source: "preference",
-      url,
-    }));
+    return [
+      { type: STARTUP_ACTION_TYPES.START_FRESH_SESSION, source: "policy" },
+      ...preference.pages.map(url => ({
+        type: STARTUP_ACTION_TYPES.OPEN_URL,
+        source: "preference",
+        url,
+      })),
+    ];
   }
 
-  return [{
-    type: "open-url",
-    source: "preference",
-    url: STARTUP_NEW_TAB_URL,
-  }];
+  return [{ type: STARTUP_ACTION_TYPES.START_FRESH_SESSION, source: "policy" }];
 }
 
 /**
  * Computes startup work without reading state or performing side effects.
- * Preference actions always precede transient external targets. A dirty or
- * unknown shutdown never restores automatically; callers may add recovery UI
- * separately without changing this policy.
+ * Preference actions always precede transient external targets. External URLs
+ * replace a would-be blank new tab, but never replace restored or specific
+ * pages. A dirty or unknown shutdown never restores automatically; callers may
+ * add recovery UI separately without changing this policy.
  */
-export function computeStartupActions({
-  preference,
-  cleanShutdown = false,
-  externalStartupUrls = [],
-} = {}) {
+export function computeStartupActions(options = {}) {
+  const normalizedOptions = options && typeof options === "object" && !Array.isArray(options)
+    ? options
+    : {};
+  const {
+    preference,
+    cleanShutdown = false,
+    externalStartupUrls = [],
+  } = normalizedOptions;
   const sanitizedPreference = sanitizeStartupPreference(preference);
   const actions = preferredStartupActions(sanitizedPreference, cleanShutdown);
 
   for (const url of sanitizeExternalStartupUrls(externalStartupUrls)) {
-    actions.push({ type: "open-url", source: "external", url });
+    actions.push({
+      type: STARTUP_ACTION_TYPES.OPEN_URL,
+      source: "external",
+      url,
+    });
+  }
+  if (!actions.some(action => (
+    action.type === STARTUP_ACTION_TYPES.RESTORE_SESSION ||
+    action.type === STARTUP_ACTION_TYPES.OPEN_URL
+  ))) {
+    actions.push({
+      type: STARTUP_ACTION_TYPES.OPEN_URL,
+      source: sanitizedPreference.mode === STARTUP_MODES.NEW_TAB
+        ? "preference"
+        : "fallback",
+      url: STARTUP_NEW_TAB_URL,
+    });
   }
   return actions;
 }

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   DEFAULT_STARTUP_MODE,
+  STARTUP_ACTION_TYPES,
   STARTUP_MODES,
   STARTUP_NEW_TAB_URL,
   STARTUP_PAGE_LIMIT,
@@ -28,7 +29,10 @@ test("sanitizes persisted startup URLs without credentials or fragments", () => 
   assert.equal(sanitizeStartupUrl("chroma://newtab/"), null);
   assert.equal(sanitizeStartupUrl("not a URL"), null);
   assert.equal(sanitizeStartupUrl(boundedUrl), boundedUrl);
-  assert.equal(sanitizeStartupUrl(`https://example.com/${"x".repeat(STARTUP_URL_MAX_LENGTH)}`), null);
+  assert.equal(
+    sanitizeStartupUrl(`https://example.com/${"x".repeat(STARTUP_URL_MAX_LENGTH)}`),
+    null
+  );
   assert.equal(sanitizeStartupUrl(null), null);
 });
 
@@ -98,7 +102,7 @@ test("restores a clean continue session and avoids restoring a dirty session", (
       preference: { mode: STARTUP_MODES.CONTINUE },
       cleanShutdown: true,
     }),
-    [{ type: "restore-session", source: "preference" }]
+    [{ type: STARTUP_ACTION_TYPES.RESTORE_SESSION, source: "preference" }]
   );
 
   for (const cleanShutdown of [false, undefined, "true"]) {
@@ -107,7 +111,14 @@ test("restores a clean continue session and avoids restoring a dirty session", (
         preference: { mode: STARTUP_MODES.CONTINUE },
         cleanShutdown,
       }),
-      [{ type: "open-url", source: "fallback", url: STARTUP_NEW_TAB_URL }]
+      [
+        { type: STARTUP_ACTION_TYPES.START_FRESH_SESSION, source: "policy" },
+        {
+          type: STARTUP_ACTION_TYPES.OPEN_URL,
+          source: "fallback",
+          url: STARTUP_NEW_TAB_URL,
+        },
+      ]
     );
   }
 });
@@ -118,7 +129,14 @@ test("computes new-tab and specific-pages actions independently of shutdown stat
       preference: { mode: STARTUP_MODES.NEW_TAB },
       cleanShutdown: true,
     }),
-    [{ type: "open-url", source: "preference", url: STARTUP_NEW_TAB_URL }]
+    [
+      { type: STARTUP_ACTION_TYPES.START_FRESH_SESSION, source: "policy" },
+      {
+        type: STARTUP_ACTION_TYPES.OPEN_URL,
+        source: "preference",
+        url: STARTUP_NEW_TAB_URL,
+      },
+    ]
   );
 
   const preference = {
@@ -129,14 +147,24 @@ test("computes new-tab and specific-pages actions independently of shutdown stat
   assert.deepEqual(
     computeStartupActions({ preference, cleanShutdown: false }),
     [
-      { type: "open-url", source: "preference", url: "https://one.test/" },
-      { type: "open-url", source: "preference", url: "https://two.test/path" },
+      { type: STARTUP_ACTION_TYPES.START_FRESH_SESSION, source: "policy" },
+      {
+        type: STARTUP_ACTION_TYPES.OPEN_URL,
+        source: "preference",
+        url: "https://one.test/",
+      },
+      {
+        type: STARTUP_ACTION_TYPES.OPEN_URL,
+        source: "preference",
+        url: "https://two.test/path",
+      },
     ]
   );
   assert.deepEqual(preference, snapshot);
 });
 
 test("keeps every valid external startup URL in stable order", () => {
+  const fragmentRouterUrl = "https://alice:secret@router.test/#/account/private";
   const externalStartupUrls = [
     "https://alice:secret@external.test/first#anchor",
     "https://external.test/repeated#same",
@@ -145,6 +173,10 @@ test("keeps every valid external startup URL in stable order", () => {
     "http://external.test/last",
   ];
 
+  assert.equal(sanitizeStartupUrl(fragmentRouterUrl), "https://router.test/");
+  assert.deepEqual(sanitizeExternalStartupUrls([fragmentRouterUrl]), [
+    "https://router.test/#/account/private",
+  ]);
   assert.deepEqual(sanitizeExternalStartupUrls(externalStartupUrls), [
     "https://external.test/first#anchor",
     "https://external.test/repeated#same",
@@ -162,16 +194,37 @@ test("keeps every valid external startup URL in stable order", () => {
       externalStartupUrls,
     }),
     [
-      { type: "open-url", source: "preference", url: "https://preference.test/" },
-      { type: "open-url", source: "external", url: "https://external.test/first#anchor" },
-      { type: "open-url", source: "external", url: "https://external.test/repeated#same" },
-      { type: "open-url", source: "external", url: "https://external.test/repeated#same" },
-      { type: "open-url", source: "external", url: "http://external.test/last" },
+      { type: STARTUP_ACTION_TYPES.START_FRESH_SESSION, source: "policy" },
+      {
+        type: STARTUP_ACTION_TYPES.OPEN_URL,
+        source: "preference",
+        url: "https://preference.test/",
+      },
+      {
+        type: STARTUP_ACTION_TYPES.OPEN_URL,
+        source: "external",
+        url: "https://external.test/first#anchor",
+      },
+      {
+        type: STARTUP_ACTION_TYPES.OPEN_URL,
+        source: "external",
+        url: "https://external.test/repeated#same",
+      },
+      {
+        type: STARTUP_ACTION_TYPES.OPEN_URL,
+        source: "external",
+        url: "https://external.test/repeated#same",
+      },
+      {
+        type: STARTUP_ACTION_TYPES.OPEN_URL,
+        source: "external",
+        url: "http://external.test/last",
+      },
     ]
   );
 });
 
-test("appends external targets after every base mode without applying the persisted page cap", () => {
+test("appends all external targets after every base mode", () => {
   const externalStartupUrls = Array.from(
     { length: STARTUP_PAGE_LIMIT + 3 },
     (_value, index) => `https://external.test/${index}`
@@ -181,17 +234,17 @@ test("appends external targets after every base mode without applying the persis
     {
       preference: { mode: STARTUP_MODES.CONTINUE },
       cleanShutdown: true,
-      base: [{ type: "restore-session", source: "preference" }],
+      base: [{ type: STARTUP_ACTION_TYPES.RESTORE_SESSION, source: "preference" }],
     },
     {
       preference: { mode: STARTUP_MODES.CONTINUE },
       cleanShutdown: false,
-      base: [{ type: "open-url", source: "fallback", url: STARTUP_NEW_TAB_URL }],
+      base: [{ type: STARTUP_ACTION_TYPES.START_FRESH_SESSION, source: "policy" }],
     },
     {
       preference: { mode: STARTUP_MODES.NEW_TAB },
       cleanShutdown: true,
-      base: [{ type: "open-url", source: "preference", url: STARTUP_NEW_TAB_URL }],
+      base: [{ type: STARTUP_ACTION_TYPES.START_FRESH_SESSION, source: "policy" }],
     },
   ];
 
@@ -227,6 +280,21 @@ test("default planning is deterministic, pure, and does not mutate inputs", () =
   assert.deepEqual(input, snapshot);
   assert.notEqual(first, second);
   assert.deepEqual(computeStartupActions(), [
-    { type: "open-url", source: "fallback", url: STARTUP_NEW_TAB_URL },
+    { type: STARTUP_ACTION_TYPES.START_FRESH_SESSION, source: "policy" },
+    {
+      type: STARTUP_ACTION_TYPES.OPEN_URL,
+      source: "fallback",
+      url: STARTUP_NEW_TAB_URL,
+    },
   ]);
+  for (const invalidInput of [null, "invalid", []]) {
+    assert.deepEqual(computeStartupActions(invalidInput), [
+      { type: STARTUP_ACTION_TYPES.START_FRESH_SESSION, source: "policy" },
+      {
+        type: STARTUP_ACTION_TYPES.OPEN_URL,
+        source: "fallback",
+        url: STARTUP_NEW_TAB_URL,
+      },
+    ]);
+  }
 });

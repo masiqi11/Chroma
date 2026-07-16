@@ -381,6 +381,64 @@ test("caps restored tabs while preserving a usable active selection", () => {
   assert.equal(stateForDisk(state).tabs.length, TAB_COUNT_LIMIT);
 });
 
+test("normalizes and persists empty folders while removing pinned memberships", () => {
+  const candidate = createDefaultState(ids());
+  const workspaceId = candidate.activeWorkspaceId;
+  const normalId = candidate.activeTabId;
+  candidate.tabs.push(
+    {
+      ...candidate.tabs[0],
+      id: "pinned",
+      pinned: true,
+      url: "https://example.com/pinned",
+    },
+    {
+      ...candidate.tabs[0],
+      id: "essential",
+      essential: true,
+      pinned: false,
+      url: "https://example.com/essential",
+    }
+  );
+  candidate.folders = [
+    {
+      id: "empty",
+      workspaceId,
+      name: "   ",
+      tabIds: [],
+      expanded: false,
+    },
+    {
+      id: "members",
+      workspaceId,
+      name: `  ${"M".repeat(90)}  `,
+      tabIds: ["pinned", "essential", normalId],
+      expanded: true,
+    },
+  ];
+
+  const state = sanitizeState(candidate, ids(), { now: NOW });
+  assert.deepEqual(
+    state.folders.map(folder => ({
+      id: folder.id,
+      name: folder.name,
+      tabIds: folder.tabIds,
+      expanded: folder.expanded,
+    })),
+    [
+      { id: "empty", name: "Folder", tabIds: [], expanded: false },
+      {
+        id: "members",
+        name: "M".repeat(80),
+        tabIds: [normalId],
+        expanded: true,
+      },
+    ]
+  );
+  assert.equal(state.tabs.find(tab => tab.id === "essential").pinned, true);
+  assert.deepEqual(stateForDisk(state).folders, state.folders);
+});
+
 test("integrates folder and split topology repair without changing active selection", () => {
   const state = sanitizeState(
     {

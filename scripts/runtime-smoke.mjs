@@ -622,7 +622,8 @@ try {
       tab.essential === false &&
       candidate.activeTabId === pinnedTabId &&
       candidate.folders.every(folder => !folder.tabIds.includes(pinnedTabId)) &&
-      !candidate.folders.some(folder => folder.id === pinnedSmokeFolderId) &&
+      candidate.folders.find(folder => folder.id === pinnedSmokeFolderId)
+        ?.tabIds.length === 0 &&
       ui.sectionHidden === false &&
       ui.gridRole === "tablist" &&
       ui.itemPresent &&
@@ -842,6 +843,12 @@ try {
     return candidate.activeTabId === testTabId &&
       !candidate.tabs.some(tab => tab.id === reopenedPinnedTabId);
   });
+  assert.equal(
+    await client.evaluate(
+      `window.chromaBrowser.command('folder:delete', { id: ${JSON.stringify(pinnedSmokeFolderId)} })`
+    ),
+    true
+  );
 
   const appearanceWorkspaceId = initial.activeWorkspaceId;
   const appearanceWorkspace = initial.workspaces.find(
@@ -2393,6 +2400,15 @@ try {
     `window.chromaBrowser.command('tab:toggle-essential', { id: ${JSON.stringify(splitTabId)} })`
   );
   assert.equal(essentialDisabled, false);
+  const splitTabUnpinned = await client.evaluate(
+    `window.chromaBrowser.command('tab:toggle-pin', { id: ${JSON.stringify(splitTabId)} })`
+  );
+  assert.equal(splitTabUnpinned, false);
+  await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    const tab = candidate.tabs.find(item => item.id === splitTabId);
+    return tab?.essential === false && tab.pinned === false;
+  });
   await client.evaluate(
     `window.chromaBrowser.command('split:tabs', { sourceId: ${JSON.stringify(splitTabId)}, targetId: ${JSON.stringify(testTabId)}, direction: 'row', placement: 'before' })`
   );
@@ -2575,6 +2591,11 @@ try {
     return !candidate.runtime.chromeModalOpen &&
       candidate.workspaces.some(workspace => workspace.name === "Smoke Space");
   });
+  const folderWorkspaceState = await client.evaluate(
+    "window.chromaBrowser.getState()"
+  );
+  const folderWorkspaceId = folderWorkspaceState.activeWorkspaceId;
+  const folderWorkspaceBaseId = folderWorkspaceState.activeTabId;
 
   await client.evaluate(
     "document.querySelector('[data-action=\"new-folder\"]').click()"
@@ -2585,14 +2606,127 @@ try {
     document.querySelector('#text-prompt-form').requestSubmit();
     return true;
   })()`);
-  await waitFor(async () => {
+  const emptyFolder = await waitFor(async () => {
     const candidate = await client.evaluate("window.chromaBrowser.getState()");
-    return candidate.folders.some(folder => folder.name === "Smoke Folder");
+    const folder = candidate.folders.find(item => item.name === "Smoke Folder");
+    if (!folder) return false;
+    const ui = await client.evaluate(`(() => {
+      const folder = document.querySelector('.folder[data-folder-id=${JSON.stringify(folder.id)}]');
+      const header = folder?.querySelector('.folder-header');
+      const dropZone = folder?.querySelector('.folder-tabs[data-drop-zone="folder"]');
+      const emptyDrop = dropZone?.querySelector('.folder-empty-drop');
+      const count = folder?.querySelector('.folder-count');
+      const bounds = dropZone?.getBoundingClientRect();
+      return {
+        empty: folder?.classList.contains('is-empty'),
+        count: count?.textContent?.trim(),
+        expanded: header?.getAttribute('aria-expanded'),
+        controls: header?.getAttribute('aria-controls'),
+        dropZoneId: dropZone?.id,
+        dropFolderId: dropZone?.dataset.folderId,
+        emptyDrop: emptyDrop?.textContent?.trim(),
+        dropHeight: bounds?.height || 0,
+      };
+    })()`);
+    return folder.workspaceId === folderWorkspaceId &&
+      folder.expanded &&
+      folder.tabIds.length === 0 &&
+      ui.empty &&
+      ui.count === "0" &&
+      ui.expanded === "true" &&
+      ui.controls === ui.dropZoneId &&
+      ui.dropFolderId === folder.id &&
+      ui.emptyDrop === "Drop tabs here" &&
+      ui.dropHeight >= 30
+      ? { state: candidate, folder, ui }
+      : false;
   });
 
-  const smokeFolderId = await client.evaluate(
-    "window.chromaBrowser.getState().then(state => state.folders.find(folder => folder.name === 'Smoke Folder').id)"
+  const smokeFolderId = emptyFolder.folder.id;
+  await waitFor(async () => {
+    try {
+      const persisted = JSON.parse(await readFile(stateFile, "utf8"));
+      const folder = persisted.folders?.find(item => item.id === smokeFolderId);
+      return folder?.expanded === true && folder.tabIds?.length === 0;
+    } catch (error) {
+      if (error?.code === "ENOENT" || error instanceof SyntaxError) return false;
+      throw error;
+    }
+  });
+
+  await client.evaluate(
+    `document.querySelector('.folder[data-folder-id=${JSON.stringify(smokeFolderId)}] .folder-menu-button').click()`
   );
+  const folderPopover = await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    const ui = await client.evaluate(`(() => {
+      const layer = document.querySelector('#popover-layer');
+      const content = document.querySelector('.content-shell');
+      const menu = document.querySelector('.folder-popover[data-folder-id=${JSON.stringify(smokeFolderId)}][role="menu"]');
+      const bounds = menu?.getBoundingClientRect();
+      return {
+        visible: Boolean(bounds && bounds.width > 100 && bounds.height > 80),
+        layerZ: Number.parseInt(getComputedStyle(layer).zIndex, 10) || 0,
+        contentZ: Number.parseInt(getComputedStyle(content).zIndex, 10) || 0,
+        actions: [...(menu?.querySelectorAll('[role="menuitem"]') || [])]
+          .map(item => item.dataset.action),
+      };
+    })()`);
+    const viewport = (
+      await client.evaluate("window.chromaBrowser.getSmokeViewports()")
+    )[folderWorkspaceBaseId];
+    return candidate.runtime.chromeModalOpen &&
+      viewport?.nativeVisible === false &&
+      ui.visible &&
+      ui.layerZ > ui.contentZ
+      ? ui
+      : false;
+  });
+  assert.deepEqual(folderPopover.actions, [
+    "folder-menu-toggle",
+    "folder-rename",
+    "folder-delete",
+  ]);
+  await client.evaluate(
+    `document.querySelector('.folder-popover[data-folder-id=${JSON.stringify(smokeFolderId)}] [data-action="folder-rename"]').click()`
+  );
+  const renamePrompt = await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    const ui = await client.evaluate(`(() => {
+      const prompt = document.querySelector('#text-prompt');
+      const input = document.querySelector('#text-prompt-input');
+      return {
+        open: prompt.open,
+        title: document.querySelector('#text-prompt-title').textContent,
+        required: input.required,
+        maxLength: input.maxLength,
+        value: input.value,
+      };
+    })()`);
+    return candidate.runtime.chromeModalOpen && ui.open ? ui : false;
+  });
+  assert.deepEqual(renamePrompt, {
+    open: true,
+    title: "Rename folder",
+    required: true,
+    maxLength: 80,
+    value: "Smoke Folder",
+  });
+  const renamedFolderName = "F".repeat(80);
+  await client.evaluate(`(() => {
+    document.querySelector('#text-prompt-input').value = ${JSON.stringify(renamedFolderName)};
+    document.querySelector('#text-prompt-form').requestSubmit();
+  })()`);
+  await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    const folder = candidate.folders.find(item => item.id === smokeFolderId);
+    const domName = await client.evaluate(
+      `document.querySelector('.folder[data-folder-id=${JSON.stringify(smokeFolderId)}] .folder-name')?.textContent || null`
+    );
+    return !candidate.runtime.chromeModalOpen &&
+      folder?.name === renamedFolderName &&
+      domName === renamedFolderName;
+  });
   const folderDragTabId = await client.evaluate(
     "window.chromaBrowser.command('tab:create', { url: 'chroma://newtab/' })"
   );
@@ -2601,9 +2735,9 @@ try {
   ));
   await client.evaluate(`(() => {
     const source = document.querySelector('.tab-row[data-tab-id=${JSON.stringify(folderDragTabId)}]');
-    const header = document.querySelector('.folder[data-folder-id=${JSON.stringify(smokeFolderId)}] > .folder-header');
+    const drop = document.querySelector('.folder[data-folder-id=${JSON.stringify(smokeFolderId)}] .folder-empty-drop');
     const sourceBounds = source.getBoundingClientRect();
-    const headerBounds = header.getBoundingClientRect();
+    const dropBounds = drop.getBoundingClientRect();
     source.dispatchEvent(new PointerEvent('pointerdown', {
       bubbles: true,
       cancelable: true,
@@ -2619,8 +2753,8 @@ try {
       pointerId: 61,
       button: 0,
       buttons: 1,
-      clientX: headerBounds.left + headerBounds.width / 2,
-      clientY: headerBounds.top + headerBounds.height / 2,
+      clientX: dropBounds.left + dropBounds.width / 2,
+      clientY: dropBounds.top + dropBounds.height / 2,
     }));
     document.dispatchEvent(new PointerEvent('pointerup', {
       bubbles: true,
@@ -2628,8 +2762,8 @@ try {
       pointerId: 61,
       button: 0,
       buttons: 0,
-      clientX: headerBounds.left + headerBounds.width / 2,
-      clientY: headerBounds.top + headerBounds.height / 2,
+      clientX: dropBounds.left + dropBounds.width / 2,
+      clientY: dropBounds.top + dropBounds.height / 2,
     }));
     return true;
   })()`);
@@ -2639,10 +2773,32 @@ try {
     const domFolderId = await client.evaluate(
       `document.querySelector('.tab-row[data-tab-id=${JSON.stringify(folderDragTabId)}]')?.closest('.folder')?.dataset.folderId || null`
     );
+    const ui = await client.evaluate(`(() => {
+      const folder = document.querySelector('.folder[data-folder-id=${JSON.stringify(smokeFolderId)}]');
+      return {
+        empty: folder?.classList.contains('is-empty'),
+        count: folder?.querySelector('.folder-count')?.textContent?.trim(),
+        dropFolderId: folder?.querySelector('.folder-tabs[data-drop-zone="folder"]')?.dataset.folderId,
+      };
+    })()`);
     return folder?.expanded &&
-      folder.tabIds.includes(folderDragTabId) &&
+      folder.tabIds.length === 1 &&
+      folder.tabIds[0] === folderDragTabId &&
       domFolderId === smokeFolderId &&
+      !ui.empty &&
+      ui.count === "1" &&
+      ui.dropFolderId === smokeFolderId &&
       !candidate.runtime.tabDragActive;
+  });
+  await waitFor(async () => {
+    try {
+      const persisted = JSON.parse(await readFile(stateFile, "utf8"));
+      return persisted.folders?.find(item => item.id === smokeFolderId)
+        ?.tabIds?.[0] === folderDragTabId;
+    } catch (error) {
+      if (error?.code === "ENOENT" || error instanceof SyntaxError) return false;
+      throw error;
+    }
   });
 
   await client.evaluate(`(() => {
@@ -2687,14 +2843,241 @@ try {
     const inUngroupedZone = await client.evaluate(
       `Boolean(document.querySelector('.ungrouped-tabs > .tab-row[data-tab-id=${JSON.stringify(folderDragTabId)}]'))`
     );
+    const ui = await client.evaluate(`(() => {
+      const folder = document.querySelector('.folder[data-folder-id=${JSON.stringify(smokeFolderId)}]');
+      const drop = folder?.querySelector('.folder-tabs[data-drop-zone="folder"]');
+      return {
+        present: Boolean(folder),
+        empty: folder?.classList.contains('is-empty'),
+        count: folder?.querySelector('.folder-count')?.textContent?.trim(),
+        dropFolderId: drop?.dataset.folderId,
+        emptyDrop: drop?.querySelector('.folder-empty-drop')?.textContent?.trim(),
+      };
+    })()`);
     return folder &&
-      !folder.tabIds.includes(folderDragTabId) &&
+      folder.expanded &&
+      folder.tabIds.length === 0 &&
       inUngroupedZone &&
+      ui.present &&
+      ui.empty &&
+      ui.count === "0" &&
+      ui.dropFolderId === smokeFolderId &&
+      ui.emptyDrop === "Drop tabs here" &&
       !candidate.runtime.tabDragActive;
+  });
+  await waitFor(async () => {
+    try {
+      const persisted = JSON.parse(await readFile(stateFile, "utf8"));
+      const folder = persisted.folders?.find(item => item.id === smokeFolderId);
+      return folder?.name === renamedFolderName && folder.tabIds?.length === 0;
+    } catch (error) {
+      if (error?.code === "ENOENT" || error instanceof SyntaxError) return false;
+      throw error;
+    }
+  });
+
+  const pinnedFolderGuardId = await client.evaluate(
+    `window.chromaBrowser.command('tab:create', { url: ${JSON.stringify(`${baseUrl}/folder-pinned-guard`)}, pinned: true })`
+  );
+  const essentialFolderGuardId = await client.evaluate(
+    `window.chromaBrowser.command('tab:create', { url: ${JSON.stringify(`${baseUrl}/folder-essential-guard`)}, essential: true })`
+  );
+  assert.ok(pinnedFolderGuardId);
+  assert.ok(essentialFolderGuardId);
+  await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    const pinned = candidate.tabs.find(tab => tab.id === pinnedFolderGuardId);
+    const essential = candidate.tabs.find(tab => tab.id === essentialFolderGuardId);
+    return pinned && !pinned.loading && pinned.pinned && !pinned.essential &&
+      essential && !essential.loading && essential.pinned && essential.essential;
+  });
+  const folderGuardBaseline = await client.evaluate(
+    "window.chromaBrowser.getState()"
+  );
+  const rejectedLibraryMoves = await client.evaluate(`Promise.all([
+    window.chromaBrowser.command('tab:reorder', { id: ${JSON.stringify(pinnedFolderGuardId)}, targetId: null, position: 'after', folderId: ${JSON.stringify(smokeFolderId)} }),
+    window.chromaBrowser.command('tab:reorder', { id: ${JSON.stringify(essentialFolderGuardId)}, targetId: null, position: 'after', folderId: ${JSON.stringify(smokeFolderId)} }),
+    window.chromaBrowser.command('folder:create', { name: 'Forbidden Folder', tabIds: [${JSON.stringify(pinnedFolderGuardId)}, ${JSON.stringify(essentialFolderGuardId)}] }),
+    window.chromaBrowser.command('split:tabs', { sourceId: ${JSON.stringify(pinnedFolderGuardId)}, targetId: ${JSON.stringify(folderWorkspaceBaseId)}, direction: 'row', placement: 'after' }),
+    window.chromaBrowser.command('split:tabs', { sourceId: ${JSON.stringify(essentialFolderGuardId)}, targetId: ${JSON.stringify(folderWorkspaceBaseId)}, direction: 'row', placement: 'after' }),
+  ])`);
+  assert.deepEqual(rejectedLibraryMoves, [false, false, null, false, false]);
+  await client.evaluate(
+    `window.chromaBrowser.command('tab:select', { id: ${JSON.stringify(pinnedFolderGuardId)} })`
+  );
+  assert.equal(
+    await client.evaluate("window.chromaBrowser.command('split:active', { direction: 'row' })"),
+    null
+  );
+  const pinnedGuardMenuOpened = await client.evaluate(`(() => {
+    const item = document.querySelector('.pinned-tab[data-tab-id=${JSON.stringify(pinnedFolderGuardId)}]');
+    if (!item) return false;
+    const bounds = item.getBoundingClientRect();
+    item.dispatchEvent(new MouseEvent('contextmenu', {
+      bubbles: true,
+      cancelable: true,
+      clientX: bounds.left + bounds.width / 2,
+      clientY: bounds.top + bounds.height / 2,
+    }));
+    return true;
+  })()`);
+  assert.equal(pinnedGuardMenuOpened, true);
+  const pinnedGuardMenu = await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    const ui = await client.evaluate(`(() => ({
+      open: Boolean(document.querySelector('#popover-layer .popover')),
+      folder: Boolean(document.querySelector('#popover-layer [data-action="context-folder"]')),
+      split: Boolean(document.querySelector('#popover-layer [data-action^="context-split"]')),
+      unsplit: Boolean(document.querySelector('#popover-layer [data-action="context-unsplit"]')),
+    }))()`);
+    return candidate.runtime.chromeModalOpen && ui.open ? ui : false;
+  });
+  assert.deepEqual(pinnedGuardMenu, {
+    open: true,
+    folder: false,
+    split: false,
+    unsplit: false,
+  });
+  await client.evaluate(`document.dispatchEvent(new KeyboardEvent('keydown', {
+    key: 'Escape', bubbles: true, cancelable: true,
+  }))`);
+  await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    return !candidate.runtime.chromeModalOpen &&
+      !await client.evaluate("Boolean(document.querySelector('#popover-layer .popover'))");
+  });
+
+  await client.evaluate(
+    `window.chromaBrowser.command('tab:select', { id: ${JSON.stringify(essentialFolderGuardId)} })`
+  );
+  assert.equal(
+    await client.evaluate("window.chromaBrowser.command('split:active', { direction: 'row' })"),
+    null
+  );
+  const essentialContextHidden = await client.evaluate(`(() => {
+    const item = document.querySelector('.essential-item[data-tab-id=${JSON.stringify(essentialFolderGuardId)}]');
+    if (!item) return false;
+    const bounds = item.getBoundingClientRect();
+    item.dispatchEvent(new MouseEvent('contextmenu', {
+      bubbles: true,
+      cancelable: true,
+      clientX: bounds.left + bounds.width / 2,
+      clientY: bounds.top + bounds.height / 2,
+    }));
+    return !document.querySelector('#popover-layer .popover');
+  })()`);
+  assert.equal(essentialContextHidden, true);
+  const folderGuardState = await client.evaluate(
+    "window.chromaBrowser.getState()"
+  );
+  assert.deepEqual(
+    folderGuardState.folders.find(folder => folder.id === smokeFolderId)?.tabIds,
+    []
+  );
+  assert.equal(
+    folderGuardState.folders.some(folder => folder.name === "Forbidden Folder"),
+    false
+  );
+  assert.deepEqual(folderGuardState.splitGroups, folderGuardBaseline.splitGroups);
+  await client.evaluate(
+    `window.chromaBrowser.command('tab:close', { id: ${JSON.stringify(essentialFolderGuardId)} })`
+  );
+  await client.evaluate(
+    `window.chromaBrowser.command('tab:close', { id: ${JSON.stringify(pinnedFolderGuardId)} })`
+  );
+
+  assert.equal(
+    await client.evaluate(
+      `window.chromaBrowser.command('tab:reorder', { id: ${JSON.stringify(folderDragTabId)}, targetId: null, position: 'after', folderId: ${JSON.stringify(smokeFolderId)} })`
+    ),
+    true
+  );
+  await client.evaluate(
+    `window.chromaBrowser.command('tab:select', { id: ${JSON.stringify(folderDragTabId)} })`
+  );
+  const folderDeleteBefore = await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    const folder = candidate.folders.find(item => item.id === smokeFolderId);
+    const viewport = (
+      await client.evaluate("window.chromaBrowser.getSmokeViewports()")
+    )[folderDragTabId];
+    return folder?.tabIds.length === 1 &&
+      folder.tabIds[0] === folderDragTabId &&
+      candidate.activeTabId === folderDragTabId &&
+      viewport?.nativeVisible === true
+      ? { state: candidate, viewport }
+      : false;
+  });
+  await client.evaluate(
+    `document.querySelector('.folder[data-folder-id=${JSON.stringify(smokeFolderId)}] .folder-menu-button').click()`
+  );
+  await waitFor(() => client.evaluate(
+    `Boolean(document.querySelector('.folder-popover[data-folder-id=${JSON.stringify(smokeFolderId)}] [data-action="folder-delete"]'))`
+  ));
+  await client.evaluate(
+    `document.querySelector('.folder-popover[data-folder-id=${JSON.stringify(smokeFolderId)}] [data-action="folder-delete"]').click()`
+  );
+  const deleteConfirmation = await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    const ui = await client.evaluate(`(() => ({
+      open: document.querySelector('#text-prompt').open,
+      title: document.querySelector('#text-prompt-title').textContent,
+      message: document.querySelector('#text-prompt-description').textContent,
+      inputHidden: document.querySelector('#text-prompt-input').hidden,
+      submit: document.querySelector('#text-prompt-submit').textContent,
+    }))()`);
+    return candidate.runtime.chromeModalOpen && ui.open ? ui : false;
+  });
+  assert.equal(deleteConfirmation.title, "Delete folder?");
+  assert.match(deleteConfirmation.message, /only removes the folder/i);
+  assert.match(deleteConfirmation.message, /1 tab will stay open/i);
+  assert.equal(deleteConfirmation.inputHidden, true);
+  assert.equal(deleteConfirmation.submit, "Delete folder");
+  await client.evaluate(
+    "document.querySelector('#text-prompt-form').requestSubmit()"
+  );
+  const folderDeleteAfter = await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    const viewport = (
+      await client.evaluate("window.chromaBrowser.getSmokeViewports()")
+    )[folderDragTabId];
+    const ui = await client.evaluate(`(() => ({
+      folderPresent: Boolean(document.querySelector('.folder[data-folder-id=${JSON.stringify(smokeFolderId)}]')),
+      ungrouped: Boolean(document.querySelector('.ungrouped-tabs > .tab-row[data-tab-id=${JSON.stringify(folderDragTabId)}]')),
+    }))()`);
+    return !candidate.runtime.chromeModalOpen &&
+      !candidate.folders.some(folder => folder.id === smokeFolderId) &&
+      candidate.tabs.some(tab => tab.id === folderDragTabId) &&
+      candidate.runtime.managedViewCount === folderDeleteBefore.state.runtime.managedViewCount &&
+      candidate.runtime.liveWebContentsCount === folderDeleteBefore.state.runtime.liveWebContentsCount &&
+      viewport?.nativeVisible === true &&
+      viewport.url === folderDeleteBefore.viewport.url &&
+      !ui.folderPresent &&
+      ui.ungrouped
+      ? { state: candidate, viewport, ui }
+      : false;
+  });
+  assert.equal(folderDeleteAfter.viewport.url, folderDeleteBefore.viewport.url);
+  await waitFor(async () => {
+    try {
+      const persisted = JSON.parse(await readFile(stateFile, "utf8"));
+      return !persisted.folders?.some(folder => folder.id === smokeFolderId) &&
+        persisted.tabs?.some(tab => tab.id === folderDragTabId);
+    } catch (error) {
+      if (error?.code === "ENOENT" || error instanceof SyntaxError) return false;
+      throw error;
+    }
   });
   await client.evaluate(
     `window.chromaBrowser.command('tab:close', { id: ${JSON.stringify(folderDragTabId)} })`
   );
+  await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    return candidate.activeTabId === folderWorkspaceBaseId &&
+      !candidate.tabs.some(tab => tab.id === folderDragTabId) &&
+      !candidate.tabs.some(tab => tab.id === pinnedFolderGuardId) &&
+      !candidate.tabs.some(tab => tab.id === essentialFolderGuardId);
+  });
 
   const beforeSnap = await client.evaluate("window.chromaBrowser.getState()");
   const snapTargetId = beforeSnap.activeTabId;
@@ -3661,7 +4044,13 @@ try {
     newTabSearch: true,
     workspaceUi: true,
     folderUi: true,
+    folderEmptyDrop: true,
+    folderRename: true,
     folderDragMove: true,
+    folderLibraryGuards: true,
+    folderDeleteIntegrity: true,
+    folderPersistence: true,
+    folderPopoverLayering: true,
     snapDragSplit: true,
     preciseSplitInsertion: true,
     fourPaneSplit: true,

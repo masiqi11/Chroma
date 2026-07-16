@@ -48,11 +48,17 @@ notice work is tracked in
 | state repair / host lifecycle | Current | broader corruption fuzzing, multi-window ownership, and crash-reporting integration |
 | cloud sync | Planned | identity, service, encryption, conflict model, and explicit synced datatypes |
 | page customization / mods | Policy/License | define an original Chroma API and security boundary; Firefox/XUL mods are not portable |
-| local unsigned macOS package | Current | explicit runtime allow-list plus packaged-executable smoke; custom Chroma icon and cross-platform package QA remain |
-| updater / signed release distribution | Basic | unsigned macOS ASAR/package smoke exists; original icon, hardened runtime, entitlements, notarization, signed updates, installer QA, rollout and rollback remain |
+| local unsigned macOS package | Current | explicit runtime allow-list, original Chroma icon, five license resources, and packaged-executable smoke; cross-platform package QA remains |
+| updater / signed release distribution | Basic | unsigned macOS ASAR/package smoke exists; hardened runtime, entitlements, notarization, signed updates, installer QA, rollout and rollback remain |
 | DRM / proprietary codecs / vendor APIs | Policy/License | Widevine agreement, codec flags, Safe Browsing/geolocation/vendor keys |
 
 ## Current interaction acceptance
+
+The packaged macOS app has been operated on an unlocked desktop for launch,
+new-tab search, direct Baidu navigation, sidebar collapse, edge reveal, overlay,
+and docked-sidebar restoration without a JavaScript-error dialog. This is a
+partial GUI check; the real-pointer split/folder gestures and cross-platform
+release checklist remain open in [`../TESTING.md`](../TESTING.md).
 
 - The expanded sidebar defaults to 228 px. Collapsing it leaves no visible
   rail; entering the invisible left-edge target reveals a rounded 228 px panel
@@ -158,10 +164,10 @@ unsigned `.app`, verifies that its ASAR contains only the declared runtime
 boundary, rejects leaked tests/scripts/artifacts/profile state, and starts the
 packaged executable far enough to exercise the preload bridge and initial live
 browser state without fatal logs. It does not establish code signing,
-notarization, Gatekeeper acceptance, updater readiness, or a branded icon; the
-current bundle intentionally uses Electron's default icon.
-It also does not establish notice completeness: the inspected `.app` currently
-contains no project, Electron, or Chromium license-notice payload. See
+notarization, Gatekeeper acceptance, or updater readiness. The current report
+does verify the original branded Chroma icon and the presence of five directly
+readable Chroma, Electron, and Chromium license resources. That minimum payload
+is not proof of a complete frozen-artifact SBOM or legal notice review; see
 [`../THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md).
 
 `visual` is an independent deterministic renderer gate. It composites the
