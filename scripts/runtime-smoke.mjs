@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
+import { createServer as createTcpServer } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -17,6 +18,8 @@ const output = [];
 let child;
 let report;
 let testServer;
+let proxyProbeServer;
+let proxyProbeConnectionCount = 0;
 let overlayClient;
 const adaptiveRequests = new Map();
 const cdpClients = new Set();
@@ -483,6 +486,86 @@ try {
       response.end(adaptiveDocument);
       return;
     }
+    if (requestUrl.pathname === "/basic-auth-cancel") {
+      // Always challenge so the cancel path is testable even after the
+      // network stack has cached credentials for this origin.
+      response.statusCode = 401;
+      response.setHeader("WWW-Authenticate", 'Basic realm="Chroma Cancel Realm"');
+      response.end("<!doctype html><title>auth-cancel-body</title>");
+      return;
+    }
+    if (requestUrl.pathname === "/basic-auth") {
+      const header = String(request.headers.authorization || "");
+      if (!header.startsWith("Basic ")) {
+        response.statusCode = 401;
+        response.setHeader("WWW-Authenticate", 'Basic realm="Chroma Smoke Realm"');
+        response.end("<!doctype html><title>Auth required</title>");
+        return;
+      }
+      const decoded = Buffer.from(header.slice(6), "base64").toString("utf8");
+      response.end(`<!doctype html><title>auth-ok:${decoded.split(":")[0]}</title>`);
+      return;
+    }
+    if (requestUrl.pathname === "/media-page") {
+      response.end(`<!doctype html><title>Media fixture loading</title>
+        <video muted playsinline></video>
+        <script>
+          const canvas = document.createElement("canvas");
+          canvas.width = 64; canvas.height = 64;
+          const context = canvas.getContext("2d");
+          setInterval(() => {
+            context.fillStyle = "#" + Math.floor(Math.random() * 0xffffff).toString(16).padStart(6, "0");
+            context.fillRect(0, 0, 64, 64);
+          }, 100);
+          const video = document.querySelector("video");
+          video.srcObject = canvas.captureStream(10);
+          if ("mediaSession" in navigator) {
+            navigator.mediaSession.metadata = new MediaMetadata({
+              title: "Smoke Song",
+              artist: "Chroma Fixture Band",
+              artwork: [{
+                src: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
+                sizes: "96x96",
+                type: "image/png",
+              }],
+            });
+          }
+          video.addEventListener("loadedmetadata", () => {
+            document.title = "media-fixture-ready";
+          });
+        </script>`);
+      return;
+    }
+    if (requestUrl.pathname === "/live-feed.xml") {
+      const origin = `http://${request.headers.host}`;
+      response.setHeader("Content-Type", "application/rss+xml; charset=utf-8");
+      response.end(`<?xml version="1.0"?>
+<rss version="2.0"><channel>
+  <title>Chroma Smoke Feed</title>
+  <item><title>Live Alpha Item</title><link>${origin}/live-item-alpha</link></item>
+  <item><title>Live Beta Item</title><link>${origin}/live-item-beta</link></item>
+</channel></rss>`);
+      return;
+    }
+    if (requestUrl.pathname === "/live-item-alpha") {
+      response.end("<!doctype html><title>Live Item Alpha</title><h1>Live Item Alpha</h1>");
+      return;
+    }
+    if (requestUrl.pathname === "/container-iso") {
+      const pane = requestUrl.searchParams.get("pane") || "unknown";
+      response.end(`<!doctype html><title>Container iso loading</title><script>
+        const seen = localStorage.getItem("chroma-container-smoke") || "empty";
+        localStorage.setItem("chroma-container-smoke", ${JSON.stringify(pane)});
+        document.title = "container-iso:" + ${JSON.stringify(pane)} + ":saw-" + seen;
+      </script>`);
+      return;
+    }
+    if (requestUrl.pathname === "/ua-echo") {
+      response.end(`<!doctype html><title>ua-echo loading</title><script>
+        document.title = "ua-echo:" + navigator.userAgent;
+      </script>`);
+      return;
+    }
     if (request.url?.startsWith("/responsive")) {
       const pane = requestUrl.searchParams.get("pane");
       response.end(`<!doctype html><meta name="viewport" content="width=device-width">
@@ -497,6 +580,17 @@ try {
   testServer.listen(0, "127.0.0.1");
   await once(testServer, "listening");
   const baseUrl = `http://127.0.0.1:${testServer.address().port}`;
+
+  // A bare TCP listener standing in for a proxy endpoint: it only counts
+  // connection attempts, so container-proxy routing can be proven without
+  // any real upstream network access.
+  proxyProbeServer = createTcpServer(socket => {
+    proxyProbeConnectionCount += 1;
+    socket.destroy();
+  });
+  proxyProbeServer.listen(0, "127.0.0.1");
+  await once(proxyProbeServer, "listening");
+  const proxyProbePort = proxyProbeServer.address().port;
 
   child = spawn(electronPath, ["--no-error-dialogs", `--remote-debugging-port=${port}`, "."], {
     cwd: root,
@@ -726,6 +820,1447 @@ try {
   });
   assert.equal(persistedBookmark.url, exampleUrl);
   assert.equal(persistedBookmark.title, "Example Domain");
+
+  const bookmarkFolderId = await client.evaluate(
+    `window.chromaBrowser.command('bookmarkFolder:create', { name: 'Smoke Folder', bookmarkIds: [] })`
+  );
+  assert.ok(bookmarkFolderId);
+  const bookmarkFolderCreatedUi = await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    const folder = candidate.bookmarkFolders?.find(item => item.id === bookmarkFolderId);
+    if (!folder) return false;
+    const ui = await client.evaluate(`(() => {
+      const section = document.querySelector('[data-bookmark-folder-id="${bookmarkFolderId}"]');
+      return section ? {
+        expanded: section.classList.contains('is-expanded'),
+        count: section.querySelector('.bookmark-folder-count')?.textContent,
+        empty: Boolean(section.querySelector('.bookmark-folder-empty')),
+      } : null;
+    })()`);
+    return ui?.empty === true && ui.count === "0" ? ui : false;
+  });
+  assert.equal(bookmarkFolderCreatedUi.expanded, true);
+
+  const movedIntoFolder = await client.evaluate(
+    `window.chromaBrowser.command('bookmark:move', { id: ${JSON.stringify(bookmarkedPage.bookmark.id)}, folderId: ${JSON.stringify(bookmarkFolderId)} })`
+  );
+  assert.equal(movedIntoFolder, true);
+  const bookmarkMovedUi = await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    const folder = candidate.bookmarkFolders?.find(item => item.id === bookmarkFolderId);
+    if (!folder || !folder.bookmarkIds.includes(bookmarkedPage.bookmark.id)) return false;
+    const ui = await client.evaluate(`(() => {
+      const section = document.querySelector('[data-bookmark-folder-id="${bookmarkFolderId}"]');
+      const item = section?.querySelector('[data-bookmark-id="${bookmarkedPage.bookmark.id}"]');
+      const count = section?.querySelector('.bookmark-folder-count')?.textContent;
+      const stillUngrouped = document.querySelector(
+        '#bookmarks-list > [data-bookmark-id="${bookmarkedPage.bookmark.id}"]'
+      );
+      return { inFolder: Boolean(item), count, stillUngrouped: Boolean(stillUngrouped) };
+    })()`);
+    return ui.inFolder && ui.count === "1" && !ui.stillUngrouped ? ui : false;
+  });
+  assert.equal(bookmarkMovedUi.stillUngrouped, false);
+
+  const persistedBookmarkFolder = await waitFor(async () => {
+    try {
+      const persisted = JSON.parse(await readFile(stateFile, "utf8"));
+      return persisted.bookmarkFolders?.find(item => item.id === bookmarkFolderId) || false;
+    } catch (error) {
+      if (error?.code === "ENOENT" || error instanceof SyntaxError) return false;
+      throw error;
+    }
+  });
+  assert.deepEqual(persistedBookmarkFolder.bookmarkIds, [bookmarkedPage.bookmark.id]);
+
+  const deletedBookmarkFolder = await client.evaluate(
+    `window.chromaBrowser.command('bookmarkFolder:delete', { id: ${JSON.stringify(bookmarkFolderId)} })`
+  );
+  assert.equal(deletedBookmarkFolder, true);
+  const bookmarkFolderDeletedUi = await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    const stillHasFolder = candidate.bookmarkFolders?.some(item => item.id === bookmarkFolderId);
+    const bookmark = candidate.bookmarks?.find(item => item.id === bookmarkedPage.bookmark.id);
+    if (stillHasFolder || !bookmark) return false;
+    const backInUngrouped = await client.evaluate(`Boolean(document.querySelector(
+      '#bookmarks-list > [data-bookmark-id="${bookmarkedPage.bookmark.id}"]'
+    ))`);
+    return backInUngrouped ? true : false;
+  });
+  assert.equal(
+    bookmarkFolderDeletedUi,
+    true,
+    "deleting a bookmark folder must ungroup, not remove, its member bookmark"
+  );
+
+  const cleanupUrl = new URL(`${baseUrl}/bookmark-cleanup-smoke`).href;
+  const cleanupTabId = await client.evaluate(
+    `window.chromaBrowser.command('tab:create', { url: ${JSON.stringify(cleanupUrl)}, activate: false })`
+  );
+  assert.ok(cleanupTabId);
+  await client.evaluate(
+    `window.chromaBrowser.command('bookmark:toggle', { id: ${JSON.stringify(cleanupTabId)} })`
+  );
+  const cleanupBookmark = await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    return candidate.bookmarks?.find(item => item.url === cleanupUrl) || false;
+  });
+
+  const secondBookmarkFolderId = await client.evaluate(
+    `window.chromaBrowser.command('bookmarkFolder:create', { name: 'Cleanup Folder', bookmarkIds: [${JSON.stringify(cleanupBookmark.id)}] })`
+  );
+  assert.ok(secondBookmarkFolderId);
+  const removedBookmarkForFolderCleanup = await client.evaluate(
+    `window.chromaBrowser.command('bookmark:remove', { id: ${JSON.stringify(cleanupBookmark.id)} })`
+  );
+  assert.equal(removedBookmarkForFolderCleanup, true);
+  const bookmarkRemovedCleanup = await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    const folder = candidate.bookmarkFolders?.find(item => item.id === secondBookmarkFolderId);
+    const stillBookmarked = candidate.bookmarks?.some(item => item.id === cleanupBookmark.id);
+    const originalStillBookmarked = candidate.bookmarks?.some(
+      item => item.id === bookmarkedPage.bookmark.id
+    );
+    return folder && !stillBookmarked && originalStillBookmarked ? folder : false;
+  });
+  assert.deepEqual(
+    bookmarkRemovedCleanup.bookmarkIds,
+    [],
+    "removing a bookmark must clear its folder membership without deleting the folder"
+  );
+  await client.evaluate(
+    `window.chromaBrowser.command('tab:close', { id: ${JSON.stringify(cleanupTabId)} })`
+  );
+  await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    return !candidate.tabs.some(tab => tab.id === cleanupTabId);
+  });
+
+  const bookmarkExportFile = path.join(userData, "bookmark-export-smoke.html");
+  const bookmarkExport = await client.evaluate(
+    `window.chromaBrowser.command('bookmark:export', { path: ${JSON.stringify(bookmarkExportFile)} })`
+  );
+  assert.ok(bookmarkExport, "bookmark export must produce a result");
+  assert.ok(bookmarkExport.exported >= 1);
+  const exportedHtml = await readFile(bookmarkExportFile, "utf8");
+  assert.ok(exportedHtml.startsWith("<!DOCTYPE NETSCAPE-Bookmark-file-1>"));
+  assert.ok(exportedHtml.includes(exampleUrl));
+
+  const bookmarkImportFile = path.join(userData, "bookmark-import-smoke.html");
+  const importedPageUrl = `${baseUrl}/bookmark-import-target`;
+  const importedNestedUrl = `${baseUrl}/bookmark-import-nested`;
+  await writeFile(bookmarkImportFile, `<!DOCTYPE NETSCAPE-Bookmark-file-1>
+<DL><p>
+  <DT><H3>Imported Smoke Folder</H3>
+  <DL><p>
+    <DT><A HREF="${importedPageUrl}">Imported Smoke Page</A>
+    <DT><A HREF="${exampleUrl}">Already Saved</A>
+    <DT><H3>Imported Nested Folder</H3>
+    <DL><p>
+      <DT><A HREF="${importedNestedUrl}">Imported Nested Page</A>
+    </DL><p>
+  </DL><p>
+</DL><p>`, "utf8");
+  const bookmarkImport = await client.evaluate(
+    `window.chromaBrowser.command('bookmark:import', { path: ${JSON.stringify(bookmarkImportFile)} })`
+  );
+  assert.deepEqual(bookmarkImport, { imported: 2, skipped: 1 });
+  const importedBookmarkState = await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    const bookmark = candidate.bookmarks?.find(item => item.url === importedPageUrl);
+    const nestedBookmark = candidate.bookmarks?.find(
+      item => item.url === importedNestedUrl
+    );
+    const folder = candidate.bookmarkFolders?.find(
+      item => item.name === "Imported Smoke Folder"
+    );
+    const nestedFolder = candidate.bookmarkFolders?.find(
+      item => item.name === "Imported Nested Folder"
+    );
+    if (
+      !bookmark || !folder || !nestedBookmark || !nestedFolder ||
+      !folder.bookmarkIds.includes(bookmark.id) ||
+      !nestedFolder.bookmarkIds.includes(nestedBookmark.id) ||
+      nestedFolder.parentId !== folder.id
+    ) {
+      return false;
+    }
+    const ui = await client.evaluate(`(() => {
+      const outer = document.querySelector('[data-bookmark-folder-id="${folder.id}"]');
+      return {
+        memberVisible: Boolean(outer?.querySelector('[data-bookmark-id="${bookmark.id}"]')),
+        nestedInsideOuter: Boolean(outer?.querySelector(
+          '[data-bookmark-folder-id="${nestedFolder.id}"] [data-bookmark-id="${nestedBookmark.id}"]'
+        )),
+      };
+    })()`);
+    return ui.memberVisible && ui.nestedInsideOuter
+      ? { bookmark, folder, nestedBookmark, nestedFolder }
+      : false;
+  });
+  assert.equal(importedBookmarkState.bookmark.title, "Imported Smoke Page");
+
+  assert.equal(
+    await client.evaluate(
+      `window.chromaBrowser.command('bookmarkFolder:move', { id: ${JSON.stringify(importedBookmarkState.nestedFolder.id)}, parentId: null })`
+    ),
+    true,
+    "a nested folder must move back to the top level"
+  );
+  await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    return candidate.bookmarkFolders?.find(
+      item => item.id === importedBookmarkState.nestedFolder.id
+    )?.parentId === "";
+  });
+  const bookmarkSearchMatches = await client.evaluate(`(() => {
+    const input = document.querySelector('#bookmark-search');
+    if (!input || input.hidden) return { visible: false };
+    input.value = 'imported';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    const list = document.querySelector('#bookmarks-list');
+    return {
+      visible: true,
+      rowCount: list.querySelectorAll('.bookmark-item').length,
+      folderCount: list.querySelectorAll('.bookmark-folder').length,
+      titles: [...list.querySelectorAll('.bookmark-title')].map(item => item.textContent).sort(),
+    };
+  })()`);
+  assert.equal(bookmarkSearchMatches.visible, true, "the bookmark search field must be visible");
+  assert.deepEqual(
+    bookmarkSearchMatches.titles,
+    ["Imported Nested Page", "Imported Smoke Page"],
+    "search must surface matches from every folder as flat rows"
+  );
+  assert.equal(bookmarkSearchMatches.rowCount, 2);
+  assert.equal(bookmarkSearchMatches.folderCount, 0);
+  const bookmarkSearchMiss = await client.evaluate(`(() => {
+    const input = document.querySelector('#bookmark-search');
+    input.value = 'no-such-bookmark-term';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    return document.querySelector('#bookmarks-list').textContent.trim();
+  })()`);
+  assert.equal(bookmarkSearchMiss, "No matching bookmarks");
+  const bookmarkSearchCleared = await client.evaluate(`(() => {
+    const input = document.querySelector('#bookmark-search');
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+    const list = document.querySelector('#bookmarks-list');
+    return {
+      value: input.value,
+      folderCount: list.querySelectorAll('.bookmark-folder').length,
+    };
+  })()`);
+  assert.equal(bookmarkSearchCleared.value, "");
+  assert.ok(
+    bookmarkSearchCleared.folderCount >= 2,
+    "clearing the search must restore the folder tree"
+  );
+
+  assert.equal(
+    await client.evaluate(
+      `window.chromaBrowser.command('bookmark:rename', { id: ${JSON.stringify(importedBookmarkState.bookmark.id)}, title: 'Imported Renamed Page' })`
+    ),
+    true
+  );
+  await waitFor(() => client.evaluate(`(() => {
+    const item = document.querySelector('.bookmark-item[data-bookmark-id=${JSON.stringify(importedBookmarkState.bookmark.id)}] .bookmark-title');
+    return item?.textContent === 'Imported Renamed Page';
+  })()`));
+  assert.equal(
+    await client.evaluate(
+      `window.chromaBrowser.command('bookmark:rename', { id: ${JSON.stringify(importedBookmarkState.bookmark.id)}, title: '   ' })`
+    ),
+    false,
+    "blank bookmark titles must be rejected"
+  );
+
+  assert.equal(
+    await client.evaluate(
+      `window.chromaBrowser.command('bookmarkFolder:move', { id: ${JSON.stringify(importedBookmarkState.folder.id)}, parentId: ${JSON.stringify(importedBookmarkState.folder.id)} })`
+    ),
+    false,
+    "self-parenting must be rejected"
+  );
+
+  for (const staleFolderId of [
+    importedBookmarkState.nestedFolder.id,
+    importedBookmarkState.folder.id,
+  ]) {
+    assert.equal(
+      await client.evaluate(
+        `window.chromaBrowser.command('bookmarkFolder:delete', { id: ${JSON.stringify(staleFolderId)} })`
+      ),
+      true
+    );
+  }
+  for (const staleBookmarkId of [
+    importedBookmarkState.bookmark.id,
+    importedBookmarkState.nestedBookmark.id,
+  ]) {
+    assert.equal(
+      await client.evaluate(
+        `window.chromaBrowser.command('bookmark:remove', { id: ${JSON.stringify(staleBookmarkId)} })`
+      ),
+      true
+    );
+  }
+
+  const dragFolderId = await client.evaluate(
+    `window.chromaBrowser.command('bookmarkFolder:create', { name: 'Drag Folder', bookmarkIds: [] })`
+  );
+  assert.ok(dragFolderId);
+  await waitFor(() => client.evaluate(
+    `Boolean(document.querySelector('[data-bookmark-folder-id="${dragFolderId}"]'))`
+  ));
+  const dragIntoFolder = await client.evaluate(`(() => {
+    const source = document.querySelector(
+      '#bookmarks-list > .bookmark-item[data-bookmark-id="${bookmarkedPage.bookmark.id}"] .bookmark-open'
+    );
+    const heading = document.querySelector(
+      '[data-bookmark-folder-id="${dragFolderId}"] .bookmark-folder-heading'
+    );
+    if (!source || !heading) return null;
+    const sourceBounds = source.getBoundingClientRect();
+    const headingBounds = heading.getBoundingClientRect();
+    const from = {
+      x: sourceBounds.left + sourceBounds.width / 2,
+      y: sourceBounds.top + sourceBounds.height / 2,
+    };
+    const to = {
+      x: headingBounds.left + headingBounds.width / 2,
+      y: headingBounds.top + headingBounds.height / 2,
+    };
+    const pointer = { pointerId: 87, button: 0, buttons: 1, bubbles: true, cancelable: true };
+    source.dispatchEvent(new PointerEvent('pointerdown', { ...pointer, clientX: from.x, clientY: from.y }));
+    document.dispatchEvent(new PointerEvent('pointermove', { ...pointer, clientX: from.x + 12, clientY: from.y + 12 }));
+    document.dispatchEvent(new PointerEvent('pointermove', { ...pointer, clientX: to.x, clientY: to.y }));
+    const highlighted = Boolean(document.querySelector('.bookmark-folder-heading.is-drop-target'));
+    document.dispatchEvent(new PointerEvent('pointerup', { ...pointer, buttons: 0, clientX: to.x, clientY: to.y }));
+    return { highlighted };
+  })()`);
+  assert.ok(dragIntoFolder, "the drag source and folder heading must both exist");
+  assert.equal(
+    dragIntoFolder.highlighted,
+    true,
+    "hovering a folder during a bookmark drag must highlight it as a drop target"
+  );
+  await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    return candidate.bookmarkFolders
+      ?.find(item => item.id === dragFolderId)
+      ?.bookmarkIds.includes(bookmarkedPage.bookmark.id);
+  });
+
+  const dragParentFolderId = await client.evaluate(
+    `window.chromaBrowser.command('bookmarkFolder:create', { name: 'Drag Parent', bookmarkIds: [] })`
+  );
+  await waitFor(() => client.evaluate(
+    `Boolean(document.querySelector('[data-bookmark-folder-id="${dragParentFolderId}"]'))`
+  ));
+  const folderDragHappened = await client.evaluate(`(() => {
+    const source = document.querySelector(
+      '[data-bookmark-folder-id="${dragFolderId}"] .bookmark-folder-header'
+    );
+    const heading = document.querySelector(
+      '[data-bookmark-folder-id="${dragParentFolderId}"] .bookmark-folder-heading'
+    );
+    if (!source || !heading) return false;
+    const sourceBounds = source.getBoundingClientRect();
+    const headingBounds = heading.getBoundingClientRect();
+    const pointer = { pointerId: 88, button: 0, buttons: 1, bubbles: true, cancelable: true };
+    source.dispatchEvent(new PointerEvent('pointerdown', { ...pointer, clientX: sourceBounds.left + 20, clientY: sourceBounds.top + sourceBounds.height / 2 }));
+    document.dispatchEvent(new PointerEvent('pointermove', { ...pointer, clientX: sourceBounds.left + 34, clientY: sourceBounds.top + 14 }));
+    document.dispatchEvent(new PointerEvent('pointermove', { ...pointer, clientX: headingBounds.left + headingBounds.width / 2, clientY: headingBounds.top + headingBounds.height / 2 }));
+    document.dispatchEvent(new PointerEvent('pointerup', { ...pointer, buttons: 0, clientX: headingBounds.left + headingBounds.width / 2, clientY: headingBounds.top + headingBounds.height / 2 }));
+    return true;
+  })()`);
+  assert.equal(folderDragHappened, true);
+  await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    return candidate.bookmarkFolders
+      ?.find(item => item.id === dragFolderId)
+      ?.parentId === dragParentFolderId;
+  });
+
+  for (const staleDragFolderId of [dragFolderId, dragParentFolderId]) {
+    assert.equal(
+      await client.evaluate(
+        `window.chromaBrowser.command('bookmarkFolder:delete', { id: ${JSON.stringify(staleDragFolderId)} })`
+      ),
+      true
+    );
+  }
+  await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    const stillBookmarked = candidate.bookmarks?.some(
+      item => item.id === bookmarkedPage.bookmark.id
+    );
+    const dragFoldersGone = ![dragFolderId, dragParentFolderId].some(id =>
+      candidate.bookmarkFolders?.some(item => item.id === id)
+    );
+    if (!stillBookmarked || !dragFoldersGone) return false;
+    return client.evaluate(`Boolean(document.querySelector(
+      '#bookmarks-list > [data-bookmark-id="${bookmarkedPage.bookmark.id}"]'
+    ))`);
+  });
+
+  const liveFeedUrl = new URL(`${baseUrl}/live-feed.xml`).href;
+  const liveFolderId = await client.evaluate(
+    `window.chromaBrowser.command('liveFolder:create', { url: ${JSON.stringify(liveFeedUrl)} })`
+  );
+  assert.ok(liveFolderId, "creating a live folder from an http feed must succeed");
+  const liveFolderUi = await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    const folder = candidate.liveFolders?.find(item => item.id === liveFolderId);
+    if (!folder || folder.status !== "ok" || folder.items.length !== 2) return false;
+    const ui = await client.evaluate(`(() => {
+      const section = document.querySelector('[data-live-folder-id="${liveFolderId}"]');
+      return section ? {
+        expanded: section.classList.contains('is-expanded'),
+        count: section.querySelector('.bookmark-folder-count')?.textContent,
+        name: section.querySelector('.bookmark-folder-name')?.textContent,
+        itemTitles: [...section.querySelectorAll('.live-folder-item-title')]
+          .map(node => node.textContent),
+      } : null;
+    })()`);
+    return ui?.count === "2" ? { folder, ui } : false;
+  });
+  assert.equal(
+    liveFolderUi.folder.name,
+    "Chroma Smoke Feed",
+    "an unnamed live folder must adopt the feed's own title"
+  );
+  assert.equal(liveFolderUi.ui.expanded, true);
+  assert.deepEqual(liveFolderUi.ui.itemTitles, ["Live Alpha Item", "Live Beta Item"]);
+  assert.deepEqual(
+    liveFolderUi.folder.items.map(item => item.url),
+    [`${baseUrl}/live-item-alpha`, `${baseUrl}/live-item-beta`]
+  );
+
+  assert.equal(
+    await client.evaluate(
+      `window.chromaBrowser.command('liveFolder:refresh', { id: ${JSON.stringify(liveFolderId)} })`
+    ),
+    false,
+    "an immediate manual refresh must be rate-limited"
+  );
+
+  const activeBeforeLiveItem = (
+    await client.evaluate("window.chromaBrowser.getState()")
+  ).activeTabId;
+  await client.evaluate(`document.querySelector(
+    '[data-live-folder-id="${liveFolderId}"] .live-folder-open'
+  ).click()`);
+  const liveItemTab = await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    const tab = candidate.tabs.find(item => item.url === `${baseUrl}/live-item-alpha`);
+    return tab && !tab.loading && tab.title === "Live Item Alpha" ? tab : false;
+  });
+  await client.evaluate(
+    `window.chromaBrowser.command('tab:close', { id: ${JSON.stringify(liveItemTab.id)} })`
+  );
+  if (activeBeforeLiveItem) {
+    await client.evaluate(
+      `window.chromaBrowser.command('tab:select', { id: ${JSON.stringify(activeBeforeLiveItem)} })`
+    );
+  }
+
+  const persistedLiveFolder = await waitFor(async () => {
+    try {
+      const persisted = JSON.parse(await readFile(stateFile, "utf8"));
+      const folder = persisted.liveFolders?.find(item => item.id === liveFolderId);
+      return folder?.items?.length === 2 ? folder : false;
+    } catch (error) {
+      if (error?.code === "ENOENT" || error instanceof SyntaxError) return false;
+      throw error;
+    }
+  });
+  assert.equal(persistedLiveFolder.sourceUrl, liveFeedUrl);
+  assert.equal(persistedLiveFolder.status, "ok");
+
+  assert.equal(
+    await client.evaluate(
+      `window.chromaBrowser.command('liveFolder:rename', { id: ${JSON.stringify(liveFolderId)}, name: 'Renamed Smoke Feed' })`
+    ),
+    true
+  );
+  await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    return candidate.liveFolders?.find(item => item.id === liveFolderId)
+      ?.name === "Renamed Smoke Feed";
+  });
+  assert.equal(
+    await client.evaluate(
+      `window.chromaBrowser.command('liveFolder:delete', { id: ${JSON.stringify(liveFolderId)} })`
+    ),
+    true
+  );
+  await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    if (candidate.liveFolders?.some(item => item.id === liveFolderId)) return false;
+    return client.evaluate(
+      `!document.querySelector('[data-live-folder-id="${liveFolderId}"]')`
+    );
+  });
+
+  const basicAuthUrl = `${baseUrl}/basic-auth`;
+  const authTabId = await client.evaluate(
+    `window.chromaBrowser.command('tab:create', { url: ${JSON.stringify(basicAuthUrl)} })`
+  );
+  assert.ok(authTabId);
+  const authChallenge = await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    if (!candidate.pendingAuth?.id) return false;
+    const dialogOpen = await client.evaluate(
+      "document.querySelector('#auth-prompt').open"
+    );
+    return dialogOpen ? candidate.pendingAuth : false;
+  });
+  assert.equal(authChallenge.realm, "Chroma Smoke Realm");
+  assert.equal(authChallenge.isProxy, false);
+  assert.ok(authChallenge.host.includes("127.0.0.1"));
+
+  await client.evaluate(`(() => {
+    document.querySelector('#auth-prompt-username').value = "smokeuser";
+    document.querySelector('#auth-prompt-password').value = "smokepass";
+    document.querySelector('#auth-prompt-form').requestSubmit();
+  })()`);
+  await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    const tab = candidate.tabs.find(item => item.id === authTabId);
+    return candidate.pendingAuth === null &&
+      tab && !tab.loading && tab.title === "auth-ok:smokeuser";
+  });
+  assert.equal(
+    await client.evaluate("document.querySelector('#auth-prompt').open"),
+    false,
+    "the sign-in dialog must close after submitting"
+  );
+
+  const cancelAuthTabId = await client.evaluate(
+    `window.chromaBrowser.command('tab:create', { url: ${JSON.stringify(`${baseUrl}/basic-auth-cancel`)} })`
+  );
+  const cancelChallengeId = await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    return candidate.pendingAuth?.id || false;
+  });
+  assert.ok(cancelChallengeId);
+  await client.evaluate("document.querySelector('#auth-prompt-cancel').click()");
+  await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    const tab = candidate.tabs.find(item => item.id === cancelAuthTabId);
+    return candidate.pendingAuth === null &&
+      tab && !tab.loading && tab.title === "auth-cancel-body";
+  });
+  for (const staleAuthTabId of [authTabId, cancelAuthTabId]) {
+    await client.evaluate(
+      `window.chromaBrowser.command('tab:close', { id: ${JSON.stringify(staleAuthTabId)} })`
+    );
+  }
+  await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    return ![authTabId, cancelAuthTabId].some(id =>
+      candidate.tabs.some(tab => tab.id === id)
+    );
+  });
+
+  const mediaPageUrl = `${baseUrl}/media-page`;
+  const mediaTabId = await client.evaluate(
+    `window.chromaBrowser.command('tab:create', { url: ${JSON.stringify(mediaPageUrl)} })`
+  );
+  assert.ok(mediaTabId);
+  await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    const tab = candidate.tabs.find(item => item.id === mediaTabId);
+    return tab && !tab.loading && tab.title === "media-fixture-ready";
+  });
+  assert.equal(
+    await client.evaluate(
+      `window.chromaBrowser.command('media:toggle-playback', { id: ${JSON.stringify(mediaTabId)} })`
+    ),
+    "playing",
+    "toggling playback on a page with paused media must start it"
+  );
+  assert.equal(
+    await client.evaluate(
+      `window.chromaBrowser.command('media:toggle-playback', { id: ${JSON.stringify(mediaTabId)} })`
+    ),
+    "paused",
+    "toggling again must pause the running media"
+  );
+  assert.equal(
+    await client.evaluate(
+      `window.chromaBrowser.command('media:toggle-playback', { id: ${JSON.stringify(mediaTabId)} })`
+    ),
+    "playing"
+  );
+  const nowPlayingState = await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    if (!candidate.mediaTabIds?.includes(mediaTabId)) return false;
+    const entries = await client.evaluate(
+      "window.chromaBrowser.command('media:now-playing', {})"
+    );
+    const entry = entries.find(item => item.tabId === mediaTabId);
+    if (!entry || !entry.playing) return false;
+    const buttonVisible = await client.evaluate(
+      "!document.querySelector('#now-playing-button').hidden"
+    );
+    return buttonVisible ? entry : false;
+  });
+  assert.equal(nowPlayingState.title, "Smoke Song");
+  assert.equal(nowPlayingState.artist, "Chroma Fixture Band");
+  assert.ok(
+    nowPlayingState.artworkUrl.startsWith("data:image/png;base64,"),
+    "MediaSession artwork must survive host validation"
+  );
+  await client.evaluate("document.querySelector('#now-playing-button').click()");
+  const nowPlayingArtworkUi = await waitFor(() => client.evaluate(`(() => {
+    const image = document.querySelector('[data-popover-kind="now-playing"] img.now-playing-art');
+    return image ? image.src.startsWith("data:image/png;base64,") : false;
+  })()`));
+  assert.equal(nowPlayingArtworkUi, true);
+  await client.evaluate("document.querySelector('#now-playing-button').click()");
+  await waitFor(() => client.evaluate(
+    "!document.querySelector('[data-popover-kind=\\\"now-playing\\\"]')"
+  ));
+  assert.equal(
+    await client.evaluate(
+      `window.chromaBrowser.command('media:toggle-playback', { id: ${JSON.stringify(mediaTabId)} })`
+    ),
+    "paused"
+  );
+  await waitFor(async () => {
+    const entries = await client.evaluate(
+      "window.chromaBrowser.command('media:now-playing', {})"
+    );
+    const entry = entries.find(item => item.tabId === mediaTabId);
+    return entry && entry.playing === false;
+  });
+
+  const pipAttempt = await client.evaluate(
+    `window.chromaBrowser.command('media:toggle-pip', { id: ${JSON.stringify(mediaTabId)} })`
+  );
+  assert.ok(
+    ["entered", null].includes(pipAttempt),
+    `PiP must enter or report null cleanly, saw ${JSON.stringify(pipAttempt)}`
+  );
+  if (pipAttempt === "entered") {
+    assert.equal(
+      await client.evaluate(
+        `window.chromaBrowser.command('media:toggle-pip', { id: ${JSON.stringify(mediaTabId)} })`
+      ),
+      "exited"
+    );
+  }
+  const mediaFreeTabId = await client.evaluate(
+    `window.chromaBrowser.command('tab:create', { url: ${JSON.stringify(exampleUrl)} })`
+  );
+  await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    const tab = candidate.tabs.find(item => item.id === mediaFreeTabId);
+    return tab && !tab.loading;
+  });
+  assert.equal(
+    await client.evaluate(
+      `window.chromaBrowser.command('media:toggle-playback', { id: ${JSON.stringify(mediaFreeTabId)} })`
+    ),
+    null,
+    "pages without media must report null instead of pretending to play"
+  );
+  assert.equal(
+    await client.evaluate(
+      `window.chromaBrowser.command('media:toggle-pip', { id: ${JSON.stringify(mediaFreeTabId)} })`
+    ),
+    null
+  );
+  for (const id of [mediaTabId, mediaFreeTabId]) {
+    await client.evaluate(
+      `window.chromaBrowser.command('tab:close', { id: ${JSON.stringify(id)} })`
+    );
+  }
+  await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    return ![mediaTabId, mediaFreeTabId].some(id =>
+      candidate.tabs.some(tab => tab.id === id)
+    );
+  });
+
+  const smokeContainerId = await client.evaluate(
+    `window.chromaBrowser.command('container:create', { name: 'Smoke Container', color: '#aabbcc' })`
+  );
+  assert.ok(smokeContainerId);
+  const containerState = await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    return candidate.containers?.find(item => item.id === smokeContainerId) || false;
+  });
+  assert.equal(containerState.name, "Smoke Container");
+  assert.equal(containerState.color, "#aabbcc");
+
+  assert.equal(
+    await client.evaluate(
+      `window.chromaBrowser.command('container:rename', { id: ${JSON.stringify(smokeContainerId)}, name: 'Isolated Work' })`
+    ),
+    true
+  );
+  await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    return candidate.containers?.find(item => item.id === smokeContainerId)
+      ?.name === "Isolated Work";
+  });
+
+  const containerIsoDefaultUrl = new URL(`${baseUrl}/container-iso?pane=default`).href;
+  const defaultIsoTabId = await client.evaluate(
+    `window.chromaBrowser.command('tab:create', { url: ${JSON.stringify(containerIsoDefaultUrl)}, activate: false })`
+  );
+  assert.ok(defaultIsoTabId);
+  await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    const tab = candidate.tabs.find(item => item.id === defaultIsoTabId);
+    return tab && !tab.loading && tab.title === "container-iso:default:saw-empty";
+  });
+
+  const containerIsoContainerUrl = new URL(`${baseUrl}/container-iso?pane=container`).href;
+  const containerIsoTabId = await client.evaluate(
+    `window.chromaBrowser.command('tab:create', { url: ${JSON.stringify(containerIsoContainerUrl)}, containerId: ${JSON.stringify(smokeContainerId)}, activate: false })`
+  );
+  assert.ok(containerIsoTabId);
+  const containerIsoTab = await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    const tab = candidate.tabs.find(item => item.id === containerIsoTabId);
+    return tab && !tab.loading && tab.title.startsWith("container-iso:container:")
+      ? tab
+      : false;
+  });
+  assert.equal(containerIsoTab.containerId, smokeContainerId);
+  assert.equal(
+    containerIsoTab.title,
+    "container-iso:container:saw-empty",
+    "a container tab must not see same-origin localStorage written by the default partition"
+  );
+
+  const containerIsoDefault2Url = new URL(`${baseUrl}/container-iso?pane=default2`).href;
+  const defaultIso2TabId = await client.evaluate(
+    `window.chromaBrowser.command('tab:create', { url: ${JSON.stringify(containerIsoDefault2Url)}, activate: false })`
+  );
+  await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    const tab = candidate.tabs.find(item => item.id === defaultIso2TabId);
+    return tab && !tab.loading &&
+      tab.title === "container-iso:default2:saw-default";
+  });
+
+  const containerDotUi = await client.evaluate(`(() => {
+    const row = document.querySelector('.tab-row[data-tab-id=${JSON.stringify(containerIsoTabId)}]');
+    const dot = row?.querySelector('.tab-container-dot');
+    return { hasDot: Boolean(dot), color: dot?.style.background || "" };
+  })()`);
+  assert.equal(containerDotUi.hasDot, true, "container tabs must show a container color dot");
+
+  const persistedContainer = await waitFor(async () => {
+    try {
+      const persisted = JSON.parse(await readFile(stateFile, "utf8"));
+      return persisted.containers?.find(item => item.id === smokeContainerId) || false;
+    } catch (error) {
+      if (error?.code === "ENOENT" || error instanceof SyntaxError) return false;
+      throw error;
+    }
+  });
+  assert.equal(persistedContainer.name, "Isolated Work");
+
+  const reopenedIsoTabId = await client.evaluate(
+    `window.chromaBrowser.command('container:reopen-tab', { id: ${JSON.stringify(defaultIso2TabId)}, containerId: ${JSON.stringify(smokeContainerId)} })`
+  );
+  assert.ok(reopenedIsoTabId);
+  assert.notEqual(reopenedIsoTabId, defaultIso2TabId);
+  const reopenedIsoTab = await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    if (candidate.tabs.some(tab => tab.id === defaultIso2TabId)) return false;
+    const tab = candidate.tabs.find(item => item.id === reopenedIsoTabId);
+    return tab && !tab.loading && tab.title.startsWith("container-iso:") ? tab : false;
+  });
+  assert.equal(reopenedIsoTab.containerId, smokeContainerId);
+  assert.equal(
+    reopenedIsoTab.title,
+    "container-iso:default2:saw-container",
+    "a reopened tab must load in the container partition, seeing only container-written storage"
+  );
+
+  assert.equal(
+    await client.evaluate(
+      `window.chromaBrowser.command('container:delete', { id: ${JSON.stringify(smokeContainerId)} })`
+    ),
+    true
+  );
+  await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    return !candidate.containers?.some(item => item.id === smokeContainerId) &&
+      !candidate.tabs.some(tab => tab.id === containerIsoTabId);
+  });
+  for (const staleTabId of [defaultIsoTabId, defaultIso2TabId]) {
+    await client.evaluate(
+      `window.chromaBrowser.command('tab:close', { id: ${JSON.stringify(staleTabId)} })`
+    );
+  }
+  await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    return !candidate.tabs.some(tab =>
+      tab.id === defaultIsoTabId || tab.id === defaultIso2TabId
+    );
+  });
+
+  const proxyContainerId = await client.evaluate(
+    `window.chromaBrowser.command('container:create', { name: 'Proxy Lab' })`
+  );
+  assert.ok(proxyContainerId);
+  const proxyRule = `socks5://127.0.0.1:${proxyProbePort}`;
+  assert.equal(
+    await client.evaluate(
+      `window.chromaBrowser.command('container:set-proxy', { id: ${JSON.stringify(proxyContainerId)}, proxy: ${JSON.stringify(` ${proxyRule.toUpperCase()} `)} })`
+    ),
+    true,
+    "a valid proxy rule must be accepted (and normalized)"
+  );
+  assert.equal(
+    await client.evaluate(
+      `window.chromaBrowser.command('container:set-proxy', { id: ${JSON.stringify(proxyContainerId)}, proxy: 'javascript:alert(1)' })`
+    ),
+    false,
+    "non-proxy schemes must be rejected"
+  );
+  await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    return candidate.containers?.find(item => item.id === proxyContainerId)?.proxy === proxyRule;
+  });
+
+  const proxyBadgeUi = await client.evaluate(`(async () => {
+    document.querySelector('[data-action="containers-menu"]').click();
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      const badge = document.querySelector('[data-popover-kind="containers"] .container-proxy-badge');
+      if (badge) {
+        const title = badge.title;
+        document.querySelector('[data-action="containers-menu"]').click();
+        return { found: true, title };
+      }
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    return { found: false };
+  })()`);
+  assert.equal(proxyBadgeUi.found, true, "the containers menu must badge proxied containers");
+  assert.ok(proxyBadgeUi.title.includes(proxyRule));
+  await waitFor(() => client.evaluate(
+    "!document.querySelector('[data-popover-kind=\\\"containers\\\"]')"
+  ));
+
+  const proxyProbeBaseline = proxyProbeConnectionCount;
+  const proxyProbeTabId = await client.evaluate(
+    `window.chromaBrowser.command('tab:create', { url: 'http://chroma-proxy-probe.invalid/', containerId: ${JSON.stringify(proxyContainerId)}, activate: false })`
+  );
+  assert.ok(proxyProbeTabId);
+  await waitFor(() => proxyProbeConnectionCount > proxyProbeBaseline);
+  await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    const tab = candidate.tabs.find(item => item.id === proxyProbeTabId);
+    return Boolean(tab && !tab.loading);
+  });
+
+  const persistedProxyContainer = await waitFor(async () => {
+    try {
+      const persisted = JSON.parse(await readFile(stateFile, "utf8"));
+      const entry = persisted.containers?.find(item => item.id === proxyContainerId);
+      return entry?.proxy === proxyRule ? entry : false;
+    } catch (error) {
+      if (error?.code === "ENOENT" || error instanceof SyntaxError) return false;
+      throw error;
+    }
+  });
+  assert.ok(persistedProxyContainer, "the container proxy rule must persist to disk");
+
+  assert.equal(
+    await client.evaluate(
+      `window.chromaBrowser.command('container:set-proxy', { id: ${JSON.stringify(proxyContainerId)}, proxy: '' })`
+    ),
+    true
+  );
+  await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    return candidate.containers?.find(item => item.id === proxyContainerId)?.proxy === "";
+  });
+  const proxyProbeAfterClear = proxyProbeConnectionCount;
+  await client.evaluate(
+    `window.chromaBrowser.command('navigation:go', { id: ${JSON.stringify(proxyProbeTabId)}, input: 'http://chroma-proxy-direct.invalid/' })`
+  );
+  await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    const tab = candidate.tabs.find(item => item.id === proxyProbeTabId);
+    return Boolean(tab && !tab.loading && tab.url.includes("chroma-proxy-direct.invalid"));
+  });
+  assert.equal(
+    proxyProbeConnectionCount,
+    proxyProbeAfterClear,
+    "after clearing the proxy, container traffic must stop routing through the proxy endpoint"
+  );
+
+  await client.evaluate(
+    `window.chromaBrowser.command('tab:close', { id: ${JSON.stringify(proxyProbeTabId)} })`
+  );
+  assert.equal(
+    await client.evaluate(
+      `window.chromaBrowser.command('container:delete', { id: ${JSON.stringify(proxyContainerId)} })`
+    ),
+    true
+  );
+  await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    return !candidate.containers?.some(item => item.id === proxyContainerId) &&
+      !candidate.tabs.some(tab => tab.id === proxyProbeTabId);
+  });
+
+  const uaContainerId = await client.evaluate(
+    `window.chromaBrowser.command('container:create', { name: 'Identity Lab' })`
+  );
+  assert.ok(uaContainerId);
+  const containerUa = "Mozilla/5.0 (X11; Linux x86_64) ChromaSmokeUA/9.9";
+  assert.equal(
+    await client.evaluate(
+      `window.chromaBrowser.command('container:set-ua', { id: ${JSON.stringify(uaContainerId)}, userAgent: 'bad\\u0000ua' })`
+    ),
+    false,
+    "control characters must be rejected in a container user agent"
+  );
+  assert.equal(
+    await client.evaluate(
+      `window.chromaBrowser.command('container:set-ua', { id: ${JSON.stringify(uaContainerId)}, userAgent: ${JSON.stringify(` ${containerUa} `)} })`
+    ),
+    true
+  );
+  const uaEchoUrl = new URL(`${baseUrl}/ua-echo`).href;
+  const uaEchoTabId = await client.evaluate(
+    `window.chromaBrowser.command('tab:create', { url: ${JSON.stringify(uaEchoUrl)}, containerId: ${JSON.stringify(uaContainerId)}, activate: false })`
+  );
+  assert.ok(uaEchoTabId);
+  await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    const tab = candidate.tabs.find(item => item.id === uaEchoTabId);
+    return Boolean(tab && !tab.loading && tab.title === `ua-echo:${containerUa}`);
+  });
+
+  const persistedUaContainer = await waitFor(async () => {
+    try {
+      const persisted = JSON.parse(await readFile(stateFile, "utf8"));
+      const entry = persisted.containers?.find(item => item.id === uaContainerId);
+      return entry?.userAgent === containerUa ? entry : false;
+    } catch (error) {
+      if (error?.code === "ENOENT" || error instanceof SyntaxError) return false;
+      throw error;
+    }
+  });
+  assert.ok(persistedUaContainer, "the container user agent must persist to disk");
+
+  assert.equal(
+    await client.evaluate(
+      `window.chromaBrowser.command('container:set-ua', { id: ${JSON.stringify(uaContainerId)}, userAgent: '' })`
+    ),
+    true
+  );
+  await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    const tab = candidate.tabs.find(item => item.id === uaEchoTabId);
+    return Boolean(
+      tab && !tab.loading &&
+      tab.title.startsWith("ua-echo:") &&
+      !tab.title.includes("ChromaSmokeUA") &&
+      candidate.containers?.find(item => item.id === uaContainerId)?.userAgent === ""
+    );
+  });
+
+  await client.evaluate(
+    `window.chromaBrowser.command('tab:close', { id: ${JSON.stringify(uaEchoTabId)} })`
+  );
+  assert.equal(
+    await client.evaluate(
+      `window.chromaBrowser.command('container:delete', { id: ${JSON.stringify(uaContainerId)} })`
+    ),
+    true
+  );
+  await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    return !candidate.containers?.some(item => item.id === uaContainerId) &&
+      !candidate.tabs.some(tab => tab.id === uaEchoTabId);
+  });
+
+  const uaOverrideUrl = new URL(`${baseUrl}/adaptive-responsive?pane=ua-override`).href;
+  const uaOverrideTabId = await client.evaluate(
+    `window.chromaBrowser.command('tab:create', { url: ${JSON.stringify(uaOverrideUrl)} })`
+  );
+  await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    const tab = candidate.tabs.find(item => item.id === uaOverrideTabId);
+    return tab && !tab.loading && tab.title === "Adaptive desktop ua-override";
+  });
+
+  const uaMenuUi = await client.evaluate(`(() => {
+    const row = document.querySelector('.tab-row[data-tab-id="${uaOverrideTabId}"]');
+    if (!row) return null;
+    const bounds = row.getBoundingClientRect();
+    row.dispatchEvent(new MouseEvent('contextmenu', {
+      bubbles: true, cancelable: true,
+      clientX: bounds.left + 12, clientY: bounds.top + 12,
+    }));
+    const item = document.querySelector('[data-action="context-ua-mode"]');
+    return item ? { label: item.textContent.trim(), mode: item.dataset.uaMode } : null;
+  })()`);
+  assert.equal(uaMenuUi?.label, "Request mobile site");
+  assert.equal(uaMenuUi?.mode, "mobile");
+  await client.evaluate(
+    `document.querySelector('[data-action="context-ua-mode"]').click()`
+  );
+  await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    const tab = candidate.tabs.find(item => item.id === uaOverrideTabId);
+    return tab && !tab.loading &&
+      tab.title === "Adaptive mobile ua-override" &&
+      candidate.uaOverrides?.[uaOverrideTabId] === "mobile";
+  });
+
+  assert.equal(
+    await client.evaluate(
+      `window.chromaBrowser.command('tab:set-ua-mode', { id: ${JSON.stringify(uaOverrideTabId)}, mode: 'auto' })`
+    ),
+    true
+  );
+  await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    const tab = candidate.tabs.find(item => item.id === uaOverrideTabId);
+    return tab && !tab.loading &&
+      tab.title === "Adaptive desktop ua-override" &&
+      !candidate.uaOverrides?.[uaOverrideTabId];
+  });
+  await client.evaluate(
+    `window.chromaBrowser.command('tab:close', { id: ${JSON.stringify(uaOverrideTabId)} })`
+  );
+  await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    return !candidate.tabs.some(tab => tab.id === uaOverrideTabId);
+  });
+
+  const essentialHomeUrl = new URL(`${baseUrl}/essential-home`).href;
+  const essentialTabId = await client.evaluate(
+    `window.chromaBrowser.command('tab:create', { url: ${JSON.stringify(essentialHomeUrl)} })`
+  );
+  await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    const tab = candidate.tabs.find(item => item.id === essentialTabId);
+    return tab && !tab.loading;
+  });
+  assert.equal(
+    await client.evaluate(
+      `window.chromaBrowser.command('tab:toggle-essential', { id: ${JSON.stringify(essentialTabId)} })`
+    ),
+    true
+  );
+  const essentialSavedState = await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    const tab = candidate.tabs.find(item => item.id === essentialTabId);
+    return tab?.essential && tab.essentialUrl === essentialHomeUrl ? tab : false;
+  });
+  assert.ok(essentialSavedState);
+
+  assert.equal(
+    await client.evaluate(
+      `window.chromaBrowser.command('navigation:go', { id: ${JSON.stringify(essentialTabId)}, input: ${JSON.stringify(`${baseUrl}/essential-away`)} })`
+    ),
+    true
+  );
+  await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    const tab = candidate.tabs.find(item => item.id === essentialTabId);
+    return tab && !tab.loading && tab.url === `${baseUrl}/essential-away`;
+  });
+
+  await client.evaluate(`document.querySelector(
+    '.essential-item[data-tab-id="${essentialTabId}"]'
+  ).dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 60, clientY: 120 }))`);
+  await waitFor(() => client.evaluate(
+    `Boolean(document.querySelector('[data-popover-kind="essential"] [data-action="essential-reset"]'))`
+  ));
+  await client.evaluate(
+    `document.querySelector('[data-action="essential-reset"]').click()`
+  );
+  await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    const tab = candidate.tabs.find(item => item.id === essentialTabId);
+    return tab && !tab.loading && tab.url === essentialHomeUrl;
+  });
+
+  const essentialParkTabId = await client.evaluate(
+    `window.chromaBrowser.command('tab:create', { url: ${JSON.stringify(exampleUrl)} })`
+  );
+  await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    const tab = candidate.tabs.find(item => item.id === essentialParkTabId);
+    return tab && !tab.loading && candidate.activeTabId === essentialParkTabId;
+  });
+  await client.evaluate(`document.querySelector(
+    '.essential-item[data-tab-id="${essentialTabId}"]'
+  ).dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 60, clientY: 120 }))`);
+  await waitFor(() => client.evaluate(
+    `Boolean(document.querySelector('[data-popover-kind="essential"] [data-action="essential-unload"]:not([disabled])'))`
+  ));
+  await client.evaluate(
+    `document.querySelector('[data-action="essential-unload"]').click()`
+  );
+  const unloadedEssential = await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    const tab = candidate.tabs.find(item => item.id === essentialTabId);
+    if (!tab?.discarded) return false;
+    const dimmed = await client.evaluate(`document.querySelector(
+      '.essential-item[data-tab-id="${essentialTabId}"]'
+    )?.classList.contains('is-discarded')`);
+    return dimmed ? tab : false;
+  });
+  assert.equal(unloadedEssential.essential, true);
+
+  assert.equal(
+    await client.evaluate(
+      `window.chromaBrowser.command('tab:select', { id: ${JSON.stringify(essentialTabId)} })`
+    ),
+    true
+  );
+  await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    const tab = candidate.tabs.find(item => item.id === essentialTabId);
+    return tab && !tab.discarded && !tab.loading && tab.url === essentialHomeUrl;
+  });
+  await client.evaluate(
+    `window.chromaBrowser.command('tab:toggle-essential', { id: ${JSON.stringify(essentialTabId)} })`
+  );
+  for (const staleId of [essentialTabId, essentialParkTabId]) {
+    await client.evaluate(
+      `window.chromaBrowser.command('tab:close', { id: ${JSON.stringify(staleId)} })`
+    );
+  }
+  await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    return ![essentialTabId, essentialParkTabId].some(id =>
+      candidate.tabs.some(tab => tab.id === id)
+    );
+  });
+
+  const siteClearUrl = new URL(`${baseUrl}/container-iso?pane=site-clear`).href;
+  const siteClearTabId = await client.evaluate(
+    `window.chromaBrowser.command('tab:create', { url: ${JSON.stringify(siteClearUrl)} })`
+  );
+  await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    const tab = candidate.tabs.find(item => item.id === siteClearTabId);
+    return tab && !tab.loading && /^container-iso:site-clear:saw-/.test(tab.title);
+  });
+  await client.evaluate(
+    `window.chromaBrowser.command('navigation:reload', { id: ${JSON.stringify(siteClearTabId)} })`
+  );
+  await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    const tab = candidate.tabs.find(item => item.id === siteClearTabId);
+    return tab && !tab.loading &&
+      tab.title === "container-iso:site-clear:saw-site-clear";
+  });
+
+  await client.evaluate("document.querySelector('#site-info-button').click()");
+  const siteInfoUi = await waitFor(() => client.evaluate(`(() => {
+    const popover = document.querySelector('[data-popover-kind="site-info"]');
+    if (!popover) return false;
+    return {
+      title: popover.querySelector('.popover-title')?.textContent,
+      insecure: Boolean(popover.querySelector('.site-info-security.is-insecure')),
+      hasClear: Boolean(popover.querySelector('[data-action="site-clear-data"]')),
+    };
+  })()`));
+  assert.equal(siteInfoUi.title, "127.0.0.1");
+  assert.equal(siteInfoUi.insecure, true, "http fixtures must present as not encrypted");
+  assert.equal(siteInfoUi.hasClear, true);
+
+  await client.evaluate(
+    `document.querySelector('[data-action="site-clear-data"]').click()`
+  );
+  await waitFor(() => client.evaluate("document.querySelector('#text-prompt').open"));
+  await client.evaluate("document.querySelector('#text-prompt-submit').click()");
+  await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    const tab = candidate.tabs.find(item => item.id === siteClearTabId);
+    return tab && !tab.loading &&
+      tab.title === "container-iso:site-clear:saw-empty";
+  });
+  await client.evaluate(
+    `window.chromaBrowser.command('tab:close', { id: ${JSON.stringify(siteClearTabId)} })`
+  );
+  await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    return !candidate.tabs.some(tab => tab.id === siteClearTabId);
+  });
+
+  const smokeExtensionDir = path.join(userData, "smoke-extension");
+  await mkdir(smokeExtensionDir, { recursive: true });
+  await writeFile(
+    path.join(smokeExtensionDir, "manifest.json"),
+    JSON.stringify({
+      manifest_version: 3,
+      name: "Chroma Smoke Extension",
+      version: "1.0.0",
+      action: {
+        default_popup: "popup.html",
+        default_title: "Open smoke popup",
+        default_icon: { 16: "icon.png" },
+      },
+      content_scripts: [
+        {
+          matches: ["http://127.0.0.1/*"],
+          js: ["content.js"],
+          run_at: "document_end",
+        },
+      ],
+    })
+  );
+  await writeFile(
+    path.join(smokeExtensionDir, "content.js"),
+    'document.title = document.title + "::chroma-ext";\n'
+  );
+  await writeFile(
+    path.join(smokeExtensionDir, "popup.html"),
+    "<!doctype html><title>chroma-smoke-popup</title><h1>Smoke popup</h1>"
+  );
+  await writeFile(
+    path.join(smokeExtensionDir, "icon.png"),
+    Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
+      "base64"
+    )
+  );
+
+  const installedExtensionId = await client.evaluate(
+    `window.chromaBrowser.command('extension:install', { path: ${JSON.stringify(smokeExtensionDir)} })`
+  );
+  assert.ok(installedExtensionId, "installing the unpacked smoke extension must succeed");
+  const extensionStateEntry = await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    return candidate.extensions?.find(item => item.id === installedExtensionId) || false;
+  });
+  assert.equal(extensionStateEntry.name, "Chroma Smoke Extension");
+  assert.equal(extensionStateEntry.version, "1.0.0");
+  assert.equal(extensionStateEntry.popupPath, "popup.html");
+  assert.equal(extensionStateEntry.actionTitle, "Open smoke popup");
+  assert.ok(
+    extensionStateEntry.iconDataUrl.startsWith("data:image/png;base64,"),
+    "the action icon must reach the shell as an embedded data URI"
+  );
+
+  const toolbarActionButton = await waitFor(async () => {
+    const ui = await client.evaluate(`(() => {
+      const button = document.querySelector(
+        '.extension-action-button[data-extension-id="${installedExtensionId}"]'
+      );
+      return button ? {
+        title: button.title,
+        hasIconImage: Boolean(button.querySelector('img.extension-action-icon')),
+      } : null;
+    })()`);
+    return ui || false;
+  });
+  assert.equal(toolbarActionButton.title, "Open smoke popup");
+  assert.equal(toolbarActionButton.hasIconImage, true);
+
+  assert.equal(
+    await client.evaluate(
+      `window.chromaBrowser.command('extension:open-popup', { id: ${JSON.stringify(installedExtensionId)} })`
+    ),
+    true,
+    "opening the extension's action popup must succeed"
+  );
+  const popupExpectedUrl = `chrome-extension://${installedExtensionId}/popup.html`;
+  await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    if (candidate.extensionPopup?.extensionId !== installedExtensionId) return false;
+    const list = await targets();
+    return list.some(target => target.url === popupExpectedUrl);
+  });
+  assert.equal(
+    await client.evaluate("window.chromaBrowser.command('extension:close-popup', {})"),
+    true
+  );
+  await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    if (candidate.extensionPopup?.open !== false) return false;
+    const list = await targets();
+    return !list.some(target => target.url === popupExpectedUrl);
+  });
+
+  const extensionProbeUrl = new URL(`${baseUrl}/extension-probe`).href;
+  const extensionProbeTabId = await client.evaluate(
+    `window.chromaBrowser.command('tab:create', { url: ${JSON.stringify(extensionProbeUrl)}, activate: false })`
+  );
+  await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    const tab = candidate.tabs.find(item => item.id === extensionProbeTabId);
+    return tab && !tab.loading &&
+      tab.title === "Example Domain::chroma-ext";
+  });
+
+  assert.equal(
+    await client.evaluate(
+      `window.chromaBrowser.command('extension:remove', { id: ${JSON.stringify(installedExtensionId)} })`
+    ),
+    true
+  );
+  await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    return !candidate.extensions?.some(item => item.id === installedExtensionId);
+  });
+  const postRemovalTabId = await client.evaluate(
+    `window.chromaBrowser.command('tab:create', { url: ${JSON.stringify(new URL(`${baseUrl}/extension-removed-probe`).href)}, activate: false })`
+  );
+  await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    const tab = candidate.tabs.find(item => item.id === postRemovalTabId);
+    return tab && !tab.loading && tab.title === "Example Domain";
+  });
+  for (const staleTabId of [extensionProbeTabId, postRemovalTabId]) {
+    await client.evaluate(
+      `window.chromaBrowser.command('tab:close', { id: ${JSON.stringify(staleTabId)} })`
+    );
+  }
+  await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    return !candidate.tabs.some(tab =>
+      tab.id === extensionProbeTabId || tab.id === postRemovalTabId
+    );
+  });
+
+  const discardTabUrl = new URL(`${baseUrl}/discard-probe`).href;
+  const discardTabId = await client.evaluate(
+    `window.chromaBrowser.command('tab:create', { url: ${JSON.stringify(discardTabUrl)}, activate: false })`
+  );
+  await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    const tab = candidate.tabs.find(item => item.id === discardTabId);
+    return tab && !tab.loading && tab.title === "Example Domain";
+  });
+  assert.equal(
+    await client.evaluate(
+      `window.chromaBrowser.command('tab:discard', { id: ${JSON.stringify(discardTabId)} })`
+    ),
+    true
+  );
+  const discardedUi = await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    const tab = candidate.tabs.find(item => item.id === discardTabId);
+    if (!tab?.discarded) return false;
+    const ui = await client.evaluate(`(() => {
+      const item = document.querySelector('.tab-item[data-tab-id=${JSON.stringify(discardTabId)}]');
+      return item ? { dimmed: item.classList.contains('is-discarded') } : null;
+    })()`);
+    return ui?.dimmed ? { tab, ui } : false;
+  });
+  assert.equal(discardedUi.tab.title, "Example Domain", "a discarded tab keeps its title");
+  assert.equal(
+    await client.evaluate(
+      `window.chromaBrowser.command('tab:discard', { id: ${JSON.stringify(discardTabId)} })`
+    ),
+    false,
+    "an already-discarded tab must reject a second unload"
+  );
+  const activeBeforeRestore = (await client.evaluate("window.chromaBrowser.getState()")).activeTabId;
+  assert.equal(
+    await client.evaluate(
+      `window.chromaBrowser.command('tab:select', { id: ${JSON.stringify(discardTabId)} })`
+    ),
+    true
+  );
+  await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    const tab = candidate.tabs.find(item => item.id === discardTabId);
+    return candidate.activeTabId === discardTabId &&
+      tab && !tab.discarded && !tab.loading &&
+      tab.title === "Example Domain";
+  });
+  await client.evaluate(
+    `window.chromaBrowser.command('tab:select', { id: ${JSON.stringify(activeBeforeRestore)} })`
+  );
+  await client.evaluate(
+    `window.chromaBrowser.command('tab:close', { id: ${JSON.stringify(discardTabId)} })`
+  );
+  await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    return !candidate.tabs.some(tab => tab.id === discardTabId) &&
+      candidate.activeTabId === activeBeforeRestore;
+  });
+
+  const glanceUrl = new URL(`${baseUrl}/glance-probe`).href;
+  assert.equal(
+    await client.evaluate(
+      `window.chromaBrowser.command('glance:open', { url: ${JSON.stringify(glanceUrl)} })`
+    ),
+    true
+  );
+  const glanceOpenState = await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    return candidate.glance?.open === true ? candidate : false;
+  });
+  assert.equal(glanceOpenState.glance.url, glanceUrl);
+  assert.equal(glanceOpenState.glance.sourceTabId, glanceOpenState.activeTabId);
+  const glanceTarget = await waitFor(async () => {
+    const list = await targets();
+    return list.find(target => target.type === "page" && target.url === glanceUrl);
+  });
+  assert.ok(glanceTarget, "the Glance preview must load as a real page target");
+  assert.equal(
+    glanceOpenState.tabs.some(tab => tab.url === glanceUrl),
+    false,
+    "a Glance preview must not create a tab record"
+  );
+
+  assert.equal(
+    await client.evaluate(
+      `window.chromaBrowser.command('glance:open', { url: 'javascript:alert(1)' })`
+    ),
+    false,
+    "unsafe Glance URLs must be rejected"
+  );
+
+  const promotedGlanceTabId = await client.evaluate(
+    "window.chromaBrowser.command('glance:promote', {})"
+  );
+  assert.ok(promotedGlanceTabId);
+  const promotedGlanceState = await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    const tab = candidate.tabs.find(item => item.id === promotedGlanceTabId);
+    return candidate.glance?.open === false &&
+      candidate.activeTabId === promotedGlanceTabId &&
+      tab && !tab.loading && tab.url === glanceUrl
+      ? candidate
+      : false;
+  });
+  assert.ok(promotedGlanceState);
+
+  assert.equal(
+    await client.evaluate(
+      `window.chromaBrowser.command('glance:open', { url: ${JSON.stringify(glanceUrl)} })`
+    ),
+    true
+  );
+  await client.evaluate(
+    `window.chromaBrowser.command('tab:select', { id: ${JSON.stringify(activeBeforeRestore)} })`
+  );
+  await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    return candidate.glance?.open === false &&
+      candidate.activeTabId === activeBeforeRestore;
+  });
+  await client.evaluate(
+    `window.chromaBrowser.command('tab:close', { id: ${JSON.stringify(promotedGlanceTabId)} })`
+  );
+  await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    return !candidate.tabs.some(tab => tab.id === promotedGlanceTabId);
+  });
 
   const shellShortcutBefore = await client.evaluate(
     "window.chromaBrowser.getState()"
@@ -1718,6 +3253,71 @@ try {
   assert.equal(deletedHistorySuggestionVisible, false);
   await client.evaluate("document.querySelector('#address-input').blur()");
 
+  // A bookmark suggestion must come from the bookmark store, not history:
+  // import a bookmark whose URL has never been visited, so no history row
+  // can satisfy the assertion.
+  const suggestionImportFile = path.join(userData, "suggestion-bookmark.html");
+  const suggestionTargetUrl = new URL(`${baseUrl}/suggestion-beacon`).href;
+  await writeFile(suggestionImportFile, `<!DOCTYPE NETSCAPE-Bookmark-file-1>
+<DL><p>
+  <DT><A HREF="${suggestionTargetUrl}">Suggestion Beacon</A>
+</DL><p>`, "utf8");
+  assert.deepEqual(
+    await client.evaluate(
+      `window.chromaBrowser.command('bookmark:import', { path: ${JSON.stringify(suggestionImportFile)} })`
+    ),
+    { imported: 1, skipped: 0 }
+  );
+  const suggestionBookmarkId = await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    return candidate.bookmarks?.find(item => item.url === suggestionTargetUrl)?.id || false;
+  });
+  // Re-drive the query on every poll: a state notification landing between
+  // a one-shot input dispatch and the suggestion render could otherwise
+  // leave the panel empty with nothing left to trigger it again. Bookmark
+  // rows render synchronously from the input event, so re-dispatching is
+  // safe here.
+  const bookmarkSuggestion = await waitFor(() => client.evaluate(`(() => {
+    const input = document.querySelector('#address-input');
+    input.focus();
+    input.value = 'Suggestion Bea';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    const rows = [...document.querySelectorAll('.address-result')];
+    const row = rows.find(item =>
+      item.querySelector('.address-result-url')?.textContent === ${JSON.stringify(suggestionTargetUrl)}
+    );
+    if (!row) return false;
+    return {
+      index: rows.indexOf(row),
+      title: row.querySelector('.address-result-title')?.textContent,
+    };
+  })()`));
+  assert.equal(bookmarkSuggestion.title, "Suggestion Beacon");
+  assert.equal(
+    bookmarkSuggestion.index,
+    1,
+    "the bookmark suggestion must sit directly under the search row"
+  );
+  // In a window without OS focus, input.blur() does not always deliver a
+  // blur event, which would leave the suggestion panel covering the sidebar
+  // for later pointer tests. The Escape path hides it synchronously.
+  await client.evaluate(`document.querySelector('#address-input').dispatchEvent(
+    new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })
+  )`);
+  await waitFor(() => client.evaluate(
+    "document.querySelector('#address-results').hidden"
+  ));
+  assert.equal(
+    await client.evaluate(
+      `window.chromaBrowser.command('bookmark:remove', { id: ${JSON.stringify(suggestionBookmarkId)} })`
+    ),
+    true
+  );
+  await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    return !candidate.bookmarks?.some(item => item.id === suggestionBookmarkId);
+  });
+
   await client.evaluate("document.querySelector('[data-action=\"open-history\"]').click()");
   await waitFor(() => client.evaluate(
     "document.querySelector('#history-panel')?.dataset.state === 'ready'"
@@ -2438,6 +4038,34 @@ try {
   assert.ok(persistedSplitRatio > .69);
   await client.evaluate(
     `window.chromaBrowser.command('split:set-ratio', { groupId: ${JSON.stringify(committedRatio.group.id)}, path: [], ratio: .5 })`
+  );
+  await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    const group = candidate.splitGroups.find(item => item.id === committedRatio.group.id);
+    return group?.layout?.ratio === .5;
+  });
+
+  assert.equal(
+    await client.evaluate(
+      "window.chromaBrowser.command('split:set-preset', { ratio: .7 })"
+    ),
+    true,
+    "a 70/30 preset must apply to the active split"
+  );
+  await waitFor(async () => {
+    const candidate = await client.evaluate("window.chromaBrowser.getState()");
+    const group = candidate.splitGroups.find(item => item.id === committedRatio.group.id);
+    return group?.layout?.ratio > .69 && group.layout.ratio < .71;
+  });
+  assert.equal(
+    await client.evaluate(
+      "window.chromaBrowser.command('split:set-preset', { ratio: .95 })"
+    ),
+    false,
+    "presets outside the 20%-80% divider bounds must be rejected"
+  );
+  await client.evaluate(
+    "window.chromaBrowser.command('split:set-preset', { ratio: .5 })"
   );
   await waitFor(async () => {
     const candidate = await client.evaluate("window.chromaBrowser.getState()");
@@ -3305,7 +4933,7 @@ try {
     await client.evaluate("window.chromaBrowser.command('split:active', { direction: 'row' })"),
     null
   );
-  const essentialContextHidden = await client.evaluate(`(() => {
+  const essentialContextMenu = await client.evaluate(`(() => {
     const item = document.querySelector('.essential-item[data-tab-id=${JSON.stringify(essentialFolderGuardId)}]');
     if (!item) return false;
     const bounds = item.getBoundingClientRect();
@@ -3315,9 +4943,24 @@ try {
       clientX: bounds.left + bounds.width / 2,
       clientY: bounds.top + bounds.height / 2,
     }));
-    return !document.querySelector('#popover-layer .popover');
+    const popover = document.querySelector('#popover-layer .popover');
+    return {
+      kind: popover?.dataset.popoverKind || "",
+      offersTabActions: Boolean(popover?.querySelector('[data-action="move-tab-to-workspace"], [data-action="tab-split"]')),
+    };
   })()`);
-  assert.equal(essentialContextHidden, true);
+  assert.equal(
+    essentialContextMenu.kind,
+    "essential",
+    "an Essential's context menu is the dedicated Essential menu"
+  );
+  assert.equal(
+    essentialContextMenu.offersTabActions,
+    false,
+    "the Essential menu must not offer folder/split tab actions"
+  );
+  await client.evaluate("document.body.click()");
+  await waitFor(() => client.evaluate("!document.querySelector('#popover-layer .popover')"));
   const folderGuardState = await client.evaluate(
     "window.chromaBrowser.getState()"
   );
@@ -4521,6 +6164,10 @@ try {
     splitPostPreviewTopology: true,
     stateRestoreModel: true,
     contentSandbox: true,
+    containerProxyPolicy: true,
+    containerUserAgentPolicy: true,
+    bookmarkSearch: true,
+    bookmarkRename: true,
     crashRecovery: true,
     viewCleanup: true,
     cleanWindowClose: true,
@@ -4598,6 +6245,7 @@ try {
   await cleanupStep("DevTools connections", closeAllCdpClients);
   await cleanupStep("Electron process", () => terminateChild(child));
   await cleanupStep("test server", () => closeTestServer(testServer));
+  await cleanupStep("proxy probe server", () => closeTestServer(proxyProbeServer));
   await cleanupStep("temporary profile", () => withTimeout(
     waitFor(async () => {
       try {

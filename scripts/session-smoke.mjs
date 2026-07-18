@@ -9,6 +9,8 @@ import { fileURLToPath } from "node:url";
 
 import electronPath from "electron";
 
+import { STATE_SCHEMA_VERSION } from "../src/shared/model.mjs";
+
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const userData = await mkdtemp(path.join(os.tmpdir(), "chroma-session-smoke-"));
 const stateFile = path.join(userData, "browser-state.json");
@@ -232,7 +234,7 @@ function appearanceSnapshotMatches(snapshot, expected) {
     : expected.theme === "light"
       ? snapshot.prefersDark === false && snapshot.prefersLight === true
       : snapshot.prefersDark !== snapshot.prefersLight;
-  return snapshot.schemaVersion === 6 &&
+  return snapshot.schemaVersion === STATE_SCHEMA_VERSION &&
     snapshot.publicTheme === expected.theme &&
     snapshot.publicReduceTransparency === expected.reduceTransparency &&
     snapshot.workspaceColor === expected.workspaceColor &&
@@ -258,7 +260,7 @@ async function waitForPersistedAppearance(expected) {
     try {
       const state = await readPersistedState();
       const workspace = findById(state.workspaces || [], expected.workspaceId);
-      return state.schemaVersion === 6 &&
+      return state.schemaVersion === STATE_SCHEMA_VERSION &&
         state.settings?.appearance?.theme === expected.theme &&
         state.settings.appearance.reduceTransparency === expected.reduceTransparency &&
         workspace?.color === expected.workspaceColor
@@ -283,7 +285,7 @@ async function setAndPersistAppearance(client, expected) {
   );
   const snapshot = await waitForAppearance(client, expected);
   const persisted = await waitForPersistedAppearance(expected);
-  assert.equal(persisted.schemaVersion, 6);
+  assert.equal(persisted.schemaVersion, STATE_SCHEMA_VERSION);
   assert.deepEqual(persisted.settings.appearance, {
     theme: expected.theme,
     reduceTransparency: expected.reduceTransparency,
@@ -326,7 +328,7 @@ try {
   const firstClient = firstLaunch.client;
   const initial = await getState(firstClient);
   trace("first launch state loaded");
-  assert.equal(initial.schemaVersion, 6);
+  assert.equal(initial.schemaVersion, STATE_SCHEMA_VERSION);
   assert.equal(initial.workspaces.length, 1);
   assert.equal(initial.tabs.length, 1);
   assert.deepEqual(initial.settings.appearance, {
@@ -499,7 +501,7 @@ try {
           [originalTabId, splitPeerId].join(",") &&
         state.settings?.sidebarWidth === 316 &&
         state.settings?.sidebarCollapsed === true &&
-        state.schemaVersion === 6 &&
+        state.schemaVersion === STATE_SCHEMA_VERSION &&
         state.settings?.appearance?.theme === darkAppearance.theme &&
         state.settings.appearance.reduceTransparency === darkAppearance.reduceTransparency &&
         findById(state.workspaces, originalWorkspaceId)?.color ===
@@ -549,7 +551,7 @@ try {
   );
   assert.equal(restoredState.settings.sidebarWidth, 316);
   assert.equal(restoredState.settings.sidebarCollapsed, true);
-  assert.equal(restoredState.schemaVersion, 6);
+  assert.equal(restoredState.schemaVersion, STATE_SCHEMA_VERSION);
   assert.deepEqual(restoredState.settings.appearance, {
     theme: darkAppearance.theme,
     reduceTransparency: darkAppearance.reduceTransparency,
@@ -710,7 +712,7 @@ try {
     initialSystemSnapshot.prefersLight
   );
   const finalState = await getState(fourthLaunch.client);
-  assert.equal(finalState.schemaVersion, 6);
+  assert.equal(finalState.schemaVersion, STATE_SCHEMA_VERSION);
   assert.deepEqual(finalState.settings.appearance, {
     theme: systemAppearance.theme,
     reduceTransparency: systemAppearance.reduceTransparency,

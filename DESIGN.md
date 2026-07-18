@@ -56,7 +56,7 @@ Alternatives considered:
 
 ### Split panes resize the viewport; they do not shrink the page
 
-Introduced in schema 5 and retained by the current schema-6 profile, each split
+Introduced in schema 5 and retained by the current schema-8 profile, each split
 group is stored as a bounded binary ratio tree: leaves identify the one-to-four
 panes, while internal nodes carry a row/column direction and a ratio clamped to
 20–80%. `splitLayoutRects` resolves that tree into native rectangles and
@@ -237,14 +237,77 @@ that repair contract while adding Appearance preferences.
 The current bookmark slice stores sanitized, de-duplicated HTTP(S) records in
 the versioned profile model. The shell can star or unstar the active page and
 renders persisted bookmarks in the sidebar with open and remove actions. This
-is a usable local workflow, but it is not yet a full bookmark manager: folders,
-import/export, richer metadata, and address-bar integration remain separate
-work.
+is a usable local workflow, but it is not yet a full bookmark manager: folder
+nesting, drag-and-drop assignment, import/export, richer metadata, and
+address-bar integration remain separate work.
+
+Schema 7 adds flat, global bookmark folders alongside this slice. A folder
+owns an ordered `bookmarkIds` list, mirroring how tab folders own `tabIds`;
+`repairBookmarkTopology` (`src/shared/state-invariants.mjs`) is a smaller
+sibling of `repairLibraryTopology` that dedupes membership across folders
+(first owner wins), drops references to missing bookmarks, and keeps an
+explicitly empty folder durable, without the split-group, workspace-ownership,
+or pinned/Essential exceptions tab folders need. Because folders are global
+rather than workspace-scoped, and this milestone assigns bookmarks to folders
+through a menu rather than the shell's pointer-drag machinery, no cross-entity
+ID reservation against workspaces/tabs and no drag hit-testing were required.
+Deleting a folder only removes the container; member bookmarks return to the
+ungrouped list. Removing a bookmark purges it from whichever folder owns it.
+
+### Containers isolate site data through persistent storage partitions
+
+Schema 8 adds a global `containers` list and a per-tab `containerId`. A tab
+whose container is valid receives a dedicated persistent Electron session via
+the `persist:chroma-container-<id>` partition; every other tab keeps the
+shared `persist:chroma-main` partition. Cookies, localStorage, IndexedDB, and
+caches therefore never cross container boundaries — this reuses Chromium's
+own storage-partition isolation rather than filtering data in JavaScript.
+
+Container IDs double as on-disk partition names, so the model holds them to a
+strict `[A-Za-z0-9_-]{1,64}` charset. An unsafe or colliding stored ID is
+regenerated instead of trimmed, because renaming a partition would silently
+detach its persisted site data. A tab referencing a missing container falls
+back to the default partition during sanitization.
+
+Session-level configuration (internal protocol, user agent, permission
+handlers, download listeners) was already applied per `Session` object behind
+an idempotence guard, so container sessions receive the identical policy
+surface as the main partition without new code paths. Deleting a container
+closes its member tabs (creating a replacement default tab first when they
+were the only tabs), removes the container record, and then clears the
+partition's storage data. A container cannot currently change an existing
+tab's identity; tabs choose their container at creation, matching the
+underlying Chromium constraint that a `WebContents` cannot swap partitions
+in place. Reopening replaces the tab record while preserving its list
+position and folder membership; pinned, Essential, and split tabs are
+rejected. Per-container proxy or user-agent policy and container-scoped
+service relationships remain future work.
+
+### Extensions replay through a registry because Electron does not persist them
+
+`src/main/extension-service.mjs` owns unpacked-extension loading for the main
+persistent partition. Electron intentionally forgets loaded extensions between
+launches, so the service keeps a small JSON registry
+(`chroma-extensions.json` in the profile directory) of installed extension
+directories and replays `loadExtension` on every boot after `app` is ready.
+Entries that fail to load are pruned from the registry with a warning rather
+than blocking startup. Packed `.crx` archives are rejected up front because
+Electron's loader does not support them; installation accepts an explicit
+directory from the trusted shell or opens a native directory picker.
+
+The renderer sees only sanitized `{id, name, version, path}` snapshots in
+public state and drives install/reload/remove through allow-listed commands.
+Extensions currently load into `persist:chroma-main` only; container
+partitions deliberately stay extension-free until a per-container policy
+exists. Extension action buttons, popups, Web Store installs, and the long
+tail of `chrome.*` APIs (declarativeNetRequest, native messaging, identity)
+remain future work — runtime smoke proves the load boundary with a real MV3
+content script, not full API parity.
 
 ### History is profile data behind a query boundary
 
 The bounded history object was introduced in schema 3 and remains present in
-the current schema-6 profile, but complete entries are not ordinary shell state
+the current schema-8 profile, but complete entries are not ordinary shell state
 broadcast after every navigation. The main-process history service owns
 recording, retention, search, deletion,
 preference changes, and persistence. The renderer receives bounded, validated
@@ -311,7 +374,7 @@ milestone.
 pause/resume/cancel/open/reveal/remove lifecycle. The controller exposes only
 cloned snapshots through the existing allow-listed state and command boundary.
 Active transfers never enter the profile file. The download slice was
-introduced in schema 4 and remains unchanged through schema 6: it persists at
+introduced in schema 4 and remains unchanged through the current schema 8: it persists at
 most 100 completed, cancelled, or interrupted records, accepts only absolute
 save paths, and strips URL credentials and fragments. Closing a controller
 removes its persistent Session listener, flushes terminal metadata, and
@@ -404,7 +467,8 @@ remaining real-pointer/keyboard checklist are recorded in
 [`UI_COMPARISON.md`](UI_COMPARISON.md).
 
 - `npm run check` is the fast static/unit gate. It covers ratio-tree geometry,
-  schema-6 state repair and migration, Appearance sanitization and command/host
+  schema-8 state repair and migration, container sanitization, Appearance
+  sanitization and command/host
   contracts, history and download service operations,
   bookmark sanitization, topology repair, command search/ranking, navigation
   normalization, workspace lifecycle, exact shortcut matching, crashed-tab
@@ -458,7 +522,252 @@ remaining real-pointer/keyboard checklist are recorded in
   Darwin/Electron-43 software-raster references; native compositor materials
   and other platforms need separate baselines and acceptance.
 
+### Glance previews are transient overlay views, not tabs
+
+A Glance preview is one host-owned `WebContentsView` shown centered above the
+active page area (8% inset on each side), created from the page context
+menu's "Preview Link in Glance" entry or the `glance:open` command. It takes
+a literal HTTP(S) link URL and rejects everything else outright — unlike the
+address bar, an unsafe scheme never becomes a search query. The preview uses
+the active tab's storage partition, the standard sandboxed page
+`webPreferences`, and the shared session policy; because it is not a managed
+tab view, the existing permission handler denies its permission requests by
+default.
+
+The preview never enters the tab list, profile state, or persistence. Escape
+closes it; Primary+Enter or `glance:promote` replaces it with a real active
+tab at the preview's current URL. Switching tabs or workspaces, opening a
+chrome modal that hides native views, starting a tab drag, a renderer crash
+inside the preview, and window teardown all retire the overlay. Popups from
+a Glance open as ordinary tabs. A visible shell frame/dim treatment, split
+conversion, and preview history policy remain future work.
+
+### Live folders are feed-backed sidebar folders with a strict fetch policy
+
+Schema 9 adds a global `liveFolders` list. A live folder names one http(s)
+RSS or Atom source and holds a snapshot of up to 30 title/URL items; clicking
+an item opens an ordinary tab, so live folders never own tabs or views. The
+feed is fetched in the main process by `src/main/feed-service.mjs` with a
+dependency-free tolerant parser: malformed documents yield an empty item
+list, non-http(s) links are dropped, and credentials and oversized bodies
+(over 1 MiB) or slow responses (over 10 s) abort the refresh. Fetches use
+plain `fetch` outside every browser session and send no cookies or stored
+credentials, so nothing about browsing state leaks to the feed host.
+
+Refreshes are rate-limited per folder in the controller — 30 seconds for
+manual refreshes and 15 minutes for the background staleness sweep — so
+neither the shell nor a hostile page can turn the browser into a request
+loop. A failed refresh marks the folder `error` but keeps its previous
+items, and the failure still stamps `refreshedAt` so retries stay limited.
+A folder created without a name adopts the feed's own title on its first
+successful refresh. Items are re-sanitized on every load (same URL rules as
+bookmarks), and folders are capped at 16 with unique sources. Additional
+provider types, per-folder refresh intervals, and unread state remain
+future work.
+
 ## Change history
+
+- 2026-07-18: Added sidebar bookmark search and bookmark renaming. The
+  search field (visible whenever bookmarks exist) filters by
+  case-insensitive title/URL substring and renders matches as a flat list
+  across all folders so filing never hides a result; Escape clears the
+  query. `bookmark:rename` trims and caps titles at 500 characters,
+  rejects blank titles, and no-ops on unchanged values; the bookmark
+  action menu gains a Rename… prompt. Multi-select management remains
+  future work.
+
+- 2026-07-18: Added per-container User-Agent policy (schema 13): each
+  container carries a `userAgent` string normalized to bounded printable
+  ASCII (512 chars, no control characters, so the value stays header-safe).
+  `container:set-ua` re-identifies live member tabs immediately (contents
+  `setUserAgent` plus a cache-bypassing reload), new member views adopt the
+  identity at creation, Glance previews from member tabs match, and the
+  automatic narrow-pane mobile adaptation stands down for pinned
+  containers just as it does for per-tab overrides — which remain the
+  strongest layer (per-tab mode > container identity > default desktop
+  UA). The containers menu gains a user-agent action and a "ua" badge;
+  `requestText` now supports caller-bounded lengths up to 512 and blank
+  submissions for clearing optional values. Runtime smoke proves the
+  identity end-to-end with a page that titles itself from
+  `navigator.userAgent` (pin, persistence, and clear-restore) plus
+  control-character rejection.
+
+- 2026-07-18: Added per-container proxy policy (schema 12): each container
+  carries a `proxy` rule normalized to a single explicit
+  `scheme://host:port` endpoint (`http`/`https`/`socks4`/`socks5`, no
+  credentials, paths, or multi-rule strings). `container:set-proxy` applies
+  the rule to the container's persistent partition through Chromium's
+  `session.setProxy` (`proxyRules`), an empty value returns the partition to
+  `mode: "system"`, persisted rules are reapplied during controller
+  initialization, and deleting a container resets its partition to the
+  system proxy before clearing storage. The containers menu gains a
+  per-container proxy action (prompt accepts a blank value to clear) and a
+  "proxy" badge on proxied rows. Runtime smoke proves routing with a local
+  TCP probe standing in for the proxy: container traffic to a non-loopback
+  hostname connects to the probe while the rule is set and stops after it is
+  cleared.
+- 2026-07-18: Added bookmark address-bar suggestions: queries of two or
+  more characters match saved bookmarks by title or URL in the shell's own
+  state (no new commands), rank up to three star-tagged rows directly under
+  the search suggestion, and drop history rows for the same URL. Selection,
+  keyboard navigation, and navigation semantics reuse the existing
+  suggestion machinery unchanged. The smoke proof imports a bookmark whose
+  URL never enters history before querying it, after the original
+  assertion was found to be satisfied by an identically-titled history row
+  (the bookmark it targeted had already been removed by an earlier smoke
+  step, and the async history path made the pass intermittent).
+
+- 2026-07-18: Added per-tab Request Mobile/Desktop Site: `tab:set-ua-mode`
+  pins a transient UA override (mobile UA reuse from the adaptive
+  machinery), reloads bypassing cache, and gates `#scheduleAdaptiveLayout`
+  so automatic narrow-pane adaptation stands down while pinned; "auto"
+  restores the desktop UA and resumes adaptation. Overrides are exposed as
+  `uaOverrides` in public state, surface in both the shell tab menu and the
+  page context menu, and are dropped when the view is destroyed.
+
+- 2026-07-18: Added Essential reset/unload semantics (schema 11): promoting
+  a tab to an Essential records its current web URL as `essentialUrl`
+  (cleared on demotion, sanitized away for non-essential or non-web tabs).
+  `essential:reset` revives a discarded view and navigates back to the
+  saved page; the Essentials grid gains a context menu (Reset / Unload /
+  Remove) with unavailable actions disabled, and unloaded Essentials render
+  dimmed. Unload reuses the existing `tab:discard` contract.
+
+- 2026-07-18: Added the site-information popover and per-origin site-data
+  clearing: the address-bar indicator became a button whose popover states
+  the connection security, container membership, and permission policy;
+  `site:clear-data` resolves the tab's partition, calls
+  `clearStorageData({origin})` there only, and reloads — internal pages are
+  refused, and the shell requires a typed confirmation dialog first.
+
+- 2026-07-18: Added MediaSession artwork: the now-playing script picks the
+  largest declared artwork image and the host admits only http(s) URLs
+  (≤2 KB) or raster data URIs (≤256 KiB, png/jpeg/gif/webp) before the
+  shell renders the thumbnail; everything else falls back to a glyph. The
+  renderer re-checks the scheme prefix before creating the `<img>`.
+
+- 2026-07-18: Added HTTP Basic/Proxy authentication prompts: `app.on("login")`
+  routes challenges to the controller, which queues them FIFO and exposes
+  only `{id, host, realm, isProxy}` to the shell — the Chromium callback
+  never crosses the bridge, credentials flow straight to the network stack
+  (bounded strings, no persistence), settled challenges cannot be answered
+  twice, and teardown cancels the queue. The shell shows a dedicated
+  sign-in dialog that closes on submit/cancel/Escape.
+
+- 2026-07-18: Added hardware media-key support: `initialize()` registers the
+  global `MediaPlayPause` accelerator (tolerating OS refusal) and routes it
+  to the most recently playing media tab, preferring an audible one; the
+  media-tab registry is kept in recency order for this. `destroy()` releases
+  the registration. The handler reuses the bounded user-gesture playback
+  script, so key presses obey the same contract as palette toggles.
+
+- 2026-07-18: Added bookmark drag-and-drop: a pointer-drag state machine
+  (6px threshold, capture-after-threshold, Escape/blur/cancel teardown,
+  post-drag click suppression) mirrors the tab-drag conventions. Dragging a
+  bookmark onto a folder files it, onto the list background ungroups it;
+  dragging a folder onto another folder nests it through the same
+  `bookmarkFolder:move` guards (self/descendant/depth rejected in the
+  host). Drop targets highlight live, and the listeners sit after the
+  tab-drag listeners so the source-contract extraction stays anchored.
+
+- 2026-07-17: Added nested bookmark folders (schema 10): folders carry a
+  `parentId` with an 8-level depth cap; `repairBookmarkTopology` breaks
+  parent cycles at a node inside the cycle (so hanging subtrees stay
+  attached), resets dangling/self parents, and flattens over-deep chains.
+  The controller validates create/move against depth and descendant checks,
+  promotes children on delete, and bookmark import/export now preserves the
+  nested structure both ways. The sidebar renders folders recursively with
+  New-subfolder and Move-to menu actions.
+
+- 2026-07-17: Added the now-playing control: the host remembers which tabs
+  have produced media (`media-started-playing`, pruned on view teardown),
+  exposes `mediaTabIds`, and `media:now-playing` reads each media tab's
+  MediaSession title/artist plus live playing state through a bounded
+  script — capped strings, tab-title fallback, discarded/crashed tabs and
+  failed scripts skipped. The shell shows a toolbar volume control whenever
+  media tabs exist (accent-lit while audible) whose popover offers
+  play/pause, mute, and jump-to-tab per entry.
+
+- 2026-07-17: Added extension toolbar action buttons: the extension service
+  embeds each extension's largest in-root raster icon (png/jpg/gif/webp,
+  128 KiB cap; SVG and root-escaping paths discarded) as a data URI in its
+  snapshot, and the shell renders one toolbar button per popup-capable
+  extension with an open-state indicator, falling back to a letter glyph
+  when no usable icon exists. The renderer re-validates the data-URI scheme
+  before display.
+
+- 2026-07-17: Added extension action popups: the extension service reads
+  `action.default_popup`/`default_title` from each manifest (rejecting paths
+  that escape the extension root), and `extension:open-popup` shows the
+  popup document in a transient sandboxed overlay anchored top-right of the
+  page area — extension-origin only, Escape closes, re-invoking toggles,
+  window-open requests become real tabs, and modal/drag transitions retire
+  it like a Glance preview. Runtime smoke opens and closes a real popup
+  target over CDP.
+
+- 2026-07-17: Added basic media controls: `media:toggle-playback` and
+  `media:toggle-pip` execute bounded page scripts with a user gesture
+  (pause-all or resume the most usable element; largest eligible video for
+  PiP), collapse non-contract results to null, refuse discarded/crashed
+  tabs, and surface through the command palette and the media context menu.
+  Runtime smoke drives a real codec-free `captureStream` video through
+  play/pause and verifies media-free pages report null.
+
+- 2026-07-17: Added bookmark import/export in the Netscape bookmark HTML
+  interchange format (`src/shared/bookmark-io.mjs`): export writes folders
+  plus ungrouped bookmarks with escaped titles and ADD_DATE stamps; import
+  tokenizes tolerant of malformed markup, flattens nested folders to one
+  level (innermost name wins), reuses same-name folders, skips known URLs,
+  drops non-http(s)/credentialed links, and caps at 2,000 entries / 5 MiB.
+  Both operations fall back to native open/save dialogs when no path is
+  given and report imported/skipped or exported counts to the shell.
+
+- 2026-07-17: Added split-ratio presets: `split:set-preset` applies a
+  bounded ratio to the active group's root divider while nested dividers
+  return to 50/50 (`applySplitRatioPreset` in `src/shared/split-ratios.mjs`).
+  Palette entries (Balance 50/50, 70/30, 30/70) carry fixed payloads through
+  a new optional catalog `payload` field, divider double-click rebalances,
+  and out-of-bounds ratios are rejected without a commit.
+
+- 2026-07-17: Added live folders: schema-9 `liveFolders` with a
+  dependency-free RSS/Atom feed service, credential-free rate-limited
+  fetching (30 s manual / 15 min background), feed-title adoption,
+  error-preserving refreshes, a sidebar section with per-folder
+  refresh/rename/delete menus, and unit plus runtime-smoke coverage.
+
+- 2026-07-17: Added Glance link previews: a transient centered overlay
+  `WebContentsView` above the active page with strict literal-URL
+  validation, Escape/Primary+Enter close-or-promote, automatic retirement on
+  tab/workspace switches and teardown, and unit plus runtime-smoke coverage
+  proving previews never create tab records.
+
+- 2026-07-17: Added manual tab unloading: a background, unsplit, uncrashed
+  tab can be unloaded from its context menu, which destroys only its native
+  view while the tab record keeps its position, title, URL, container, and
+  folder membership. Selecting the tab (or composing it into a split)
+  recreates the view and reloads the page. The transient `discarded` flag is
+  reset by sanitization so every restored profile tab still receives a view.
+
+- 2026-07-17: Added basic Chrome-extension support: an extension service that
+  loads unpacked MV3 extensions into the main partition, replays a JSON
+  registry on every launch, prunes failing entries, and exposes
+  install/reload/remove commands plus a sidebar Extensions control. Runtime
+  smoke installs a fixture extension, observes its content script executing
+  on a real page, and verifies removal.
+
+- 2026-07-17: Bumped profile persistence to schema 8 and added container
+  identities: per-container persistent storage partitions, partition-safe ID
+  sanitization, create/rename/recolor/delete commands, new-tab-in-container,
+  context-menu reopen-in/out-of-container that preserves tab position and
+  folder membership,
+  a sidebar Containers control with tab color indicators, tab closure plus
+  partition storage clearing on delete, and runtime-smoke evidence that
+  same-origin localStorage does not cross partition boundaries.
+
+- 2026-07-17: Bumped profile persistence to schema 7 and added flat, global
+  bookmark folders (create/rename/delete, menu-based move-into/move-out
+  assignment) with a dedicated topology repair pass, covered by unit,
+  controller, and end-to-end runtime-smoke evidence.
 
 - 2026-07-16: Added host-validated Space deletion/reordering/eligible-tab
   movement, shell-owned crashed-pane recovery that preserves tab topology, and

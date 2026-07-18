@@ -71,24 +71,24 @@ ceiling merely to make a regression pass.
 
 ## Current recorded result
 
-The checked `schemaVersion: 1` report was captured on 2026-07-16 on Darwin arm64
-(OS release 27.0.0, Node 25.9.0) with Electron 43.1.0 / Chromium
+The checked `schemaVersion: 1` report was captured on 2026-07-18 on Darwin arm64
+(OS release 27.0.0, Node 22.23.1) with Electron 43.1.0 / Chromium
 150.0.7871.47. It records Git commit
-`c112407c59f71191868a6f7f0c866d009aca02bb` with a dirty working tree:
+`4ff5f7a269978f40fdeb87a08a34360807348045` with a dirty working tree:
 
 | Metric | Result | Ceiling |
 |---|---:|---:|
-| Shell ready | 857.2 ms | 20,000 ms |
-| First local page ready | 1,208.0 ms | 25,000 ms |
-| First page after shell ready | 350.8 ms | diagnostic only |
-| One-tab median RSS | 725.5 MiB | 900 MiB |
-| One-tab peak RSS | 725.5 MiB | diagnostic only |
-| Eight-tab median RSS | 1,369.9 MiB | 1,800 MiB |
-| Eight-tab peak RSS | 1,370.1 MiB | diagnostic only |
-| Eight-tab RSS delta | 644.4 MiB | 1,100 MiB |
+| Shell ready | 1,291.4 ms | 20,000 ms |
+| First local page ready | 1,535.7 ms | 25,000 ms |
+| First page after shell ready | 244.3 ms | diagnostic only |
+| One-tab median RSS | 750.6 MiB | 900 MiB |
+| One-tab peak RSS | 757.2 MiB | diagnostic only |
+| Eight-tab median RSS | 1,275.5 MiB | 1,800 MiB |
+| Eight-tab peak RSS | 1,312.4 MiB | diagnostic only |
+| Eight-tab RSS delta | 524.9 MiB | 1,100 MiB |
 
-The five one-tab samples ranged from 725.1 to 725.5 MiB across six processes;
-the five eight-tab samples ranged from 1,369.9 to 1,370.1 MiB across thirteen
+The five one-tab samples ranged from 748.3 to 757.2 MiB across six processes;
+the five eight-tab samples ranged from 1,256.9 to 1,312.4 MiB across thirteen
 processes. All configured ceilings passed, with no fatal-log matches or cleanup
 errors.
 

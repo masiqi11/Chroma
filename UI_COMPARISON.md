@@ -26,13 +26,13 @@ is `artifacts/visual/report.json`; baseline geometry is stored in
 
 | Scene | Chroma baseline | Current capture | Generated difference | Current result |
 |---|---|---|---|---:|
-| Expanded sidebar, dark, one page | [`expanded-dark.png`](test/visual/baselines/darwin-electron43/expanded-dark.png) | `artifacts/visual/expanded-dark.actual.png` | `artifacts/visual/expanded-dark.diff.png` | 57 pixels (0.0062%); no geometry differences |
-| Expanded sidebar, light, one page | [`expanded-light.png`](test/visual/baselines/darwin-electron43/expanded-light.png) | `artifacts/visual/expanded-light.actual.png` | `artifacts/visual/expanded-light.diff.png` | 55 pixels (0.0060%); no geometry differences |
+| Expanded sidebar, dark, one page | [`expanded-dark.png`](test/visual/baselines/darwin-electron43/expanded-dark.png) | `artifacts/visual/expanded-dark.actual.png` | `artifacts/visual/expanded-dark.diff.png` | 0 changed pixels; no geometry differences |
+| Expanded sidebar, light, one page | [`expanded-light.png`](test/visual/baselines/darwin-electron43/expanded-light.png) | `artifacts/visual/expanded-light.actual.png` | `artifacts/visual/expanded-light.diff.png` | 0 changed pixels; no geometry differences |
 | Sidebar collapsed to zero visible width | [`collapsed-dark-hidden.png`](test/visual/baselines/darwin-electron43/collapsed-dark-hidden.png) | `artifacts/visual/collapsed-dark-hidden.actual.png` | `artifacts/visual/collapsed-dark-hidden.diff.png` | 0 changed pixels; no geometry differences |
 | Floating dark sidebar overlay, composed from its independent overlay target | [`overlay-dark.png`](test/visual/baselines/darwin-electron43/overlay-dark.png) | `artifacts/visual/overlay-dark.actual.png` | `artifacts/visual/overlay-dark.diff.png` | 0 changed pixels; no geometry differences |
-| Two-pane dark split, 60/40 | [`split-2-dark-60-40.png`](test/visual/baselines/darwin-electron43/split-2-dark-60-40.png) | `artifacts/visual/split-2-dark-60-40.actual.png` | `artifacts/visual/split-2-dark-60-40.diff.png` | 57 pixels (0.0062%); no geometry differences |
-| Three-pane dark split, 1/2 + 1/4 + 1/4 | [`split-3-dark.png`](test/visual/baselines/darwin-electron43/split-3-dark.png) | `artifacts/visual/split-3-dark.actual.png` | `artifacts/visual/split-3-dark.diff.png` | 57 pixels (0.0062%); no geometry differences |
-| Four-pane dark split, 2×2 | [`split-4-dark.png`](test/visual/baselines/darwin-electron43/split-4-dark.png) | `artifacts/visual/split-4-dark.actual.png` | `artifacts/visual/split-4-dark.diff.png` | 57 pixels (0.0062%); no geometry differences |
+| Two-pane dark split, 60/40 | [`split-2-dark-60-40.png`](test/visual/baselines/darwin-electron43/split-2-dark-60-40.png) | `artifacts/visual/split-2-dark-60-40.actual.png` | `artifacts/visual/split-2-dark-60-40.diff.png` | 0 changed pixels; no geometry differences |
+| Three-pane dark split, 1/2 + 1/4 + 1/4 | [`split-3-dark.png`](test/visual/baselines/darwin-electron43/split-3-dark.png) | `artifacts/visual/split-3-dark.actual.png` | `artifacts/visual/split-3-dark.diff.png` | 0 changed pixels; no geometry differences |
+| Four-pane dark split, 2×2 | [`split-4-dark.png`](test/visual/baselines/darwin-electron43/split-4-dark.png) | `artifacts/visual/split-4-dark.actual.png` | `artifacts/visual/split-4-dark.diff.png` | 0 changed pixels; no geometry differences |
 
 The files under `artifacts/visual/` are generated and ignored; rerunning
 `npm run visual` recreates them. The implementation baselines and manifest live
@@ -40,9 +40,10 @@ under `test/visual/baselines/darwin-electron43/`.
 
 ## What this self-regression result means
 
-All seven scenes pass the deterministic software-raster contract; two scenes
-are pixel-identical and the others differ by at most 0.0062%, with no geometry
-change. This does **not** mean:
+All seven scenes pass the deterministic software-raster contract with zero
+changed pixels and no geometry change. The 2026-07-18 baselines were reviewed
+and intentionally refreshed after bookmark-search and live-folder controls
+changed the sidebar geometry. This does **not** mean:
 
 - 100% visual similarity to Arc or Zen;
 - any measured Arc/Zen similarity score;

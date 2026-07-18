@@ -39,7 +39,7 @@
         </div>
 
         <form id="address-form" class="address-form">
-          <span id="site-indicator" class="site-indicator" aria-hidden="true"></span>
+          <button id="site-info-button" class="site-info-button" type="button" data-action="site-info" title="Site information" aria-label="Site information" aria-haspopup="menu"><span id="site-indicator" class="site-indicator" aria-hidden="true"></span></button>
           <input id="address-input" type="text" inputmode="url" autocomplete="off" spellcheck="false" aria-label="Address and search" placeholder="Search or enter address" />
           <span id="loading-indicator" class="loading-indicator" aria-hidden="true"></span>
           <button id="bookmark-toggle" class="address-action" type="button" data-action="toggle-bookmark" title="Bookmark this page" aria-label="Bookmark this page" aria-pressed="false"></button>
@@ -65,8 +65,21 @@
         </section>
 
         <section id="bookmarks-section" class="bookmarks-section" aria-label="Bookmarks">
-          <button id="bookmarks-toggle" class="bookmarks-header" type="button" data-action="toggle-bookmarks" aria-controls="bookmarks-list" aria-expanded="true"></button>
+          <div class="bookmarks-header-row">
+            <button id="bookmarks-toggle" class="bookmarks-header" type="button" data-action="toggle-bookmarks" aria-controls="bookmarks-list" aria-expanded="true"></button>
+            <button class="icon-button subtle" data-action="new-bookmark-folder" title="New bookmark folder" aria-label="New bookmark folder"></button>
+            <button class="icon-button subtle" data-action="bookmarks-menu" title="Bookmark import and export" aria-label="Bookmark import and export" aria-haspopup="menu"></button>
+          </div>
+          <input id="bookmark-search" class="bookmark-search" type="search" placeholder="Search bookmarks" aria-label="Search bookmarks" autocomplete="off" spellcheck="false" hidden>
           <div id="bookmarks-list" class="bookmarks-list"></div>
+        </section>
+
+        <section id="live-folders-section" class="live-folders-section" aria-label="Live folders">
+          <div class="bookmarks-header-row">
+            <span class="live-folders-header"><span class="live-folders-heading-icon"></span><span class="live-folders-heading">Live Folders</span></span>
+            <button class="icon-button subtle" data-action="new-live-folder" title="New live folder from a feed" aria-label="New live folder from a feed"></button>
+          </div>
+          <div id="live-folders-list" class="live-folders-list"></div>
         </section>
 
         <div class="tab-list-toolbar">
@@ -75,6 +88,10 @@
             <span class="button-label">New Tab</span>
           </button>
           <button class="icon-button subtle" data-action="new-folder" title="New folder" aria-label="New folder"></button>
+          <button class="icon-button subtle" data-action="containers-menu" title="Containers" aria-label="Containers" aria-haspopup="menu"></button>
+          <button class="icon-button subtle" data-action="extensions-menu" title="Extensions" aria-label="Extensions" aria-haspopup="menu"></button>
+          <div id="extension-actions" class="extension-actions" role="group" aria-label="Extension actions"></div>
+          <button id="now-playing-button" class="icon-button subtle" data-action="now-playing-menu" title="Now playing" aria-label="Now playing" aria-haspopup="menu" hidden></button>
         </div>
 
         <div id="tabs-scroll" class="tabs-scroll">
@@ -178,6 +195,21 @@
           <div class="text-prompt-actions">
             <button id="text-prompt-cancel" type="button" class="prompt-button secondary">Cancel</button>
             <button id="text-prompt-submit" type="submit" class="prompt-button primary">Create</button>
+          </div>
+        </form>
+      </dialog>
+
+      <dialog id="auth-prompt" class="text-prompt" aria-labelledby="auth-prompt-title" aria-describedby="auth-prompt-description">
+        <form id="auth-prompt-form" class="text-prompt-form">
+          <h2 id="auth-prompt-title">Sign in</h2>
+          <p id="auth-prompt-description" class="text-prompt-description"></p>
+          <label for="auth-prompt-username">Username</label>
+          <input id="auth-prompt-username" type="text" maxlength="500" autocomplete="username" />
+          <label for="auth-prompt-password">Password</label>
+          <input id="auth-prompt-password" type="password" maxlength="500" autocomplete="current-password" />
+          <div class="text-prompt-actions">
+            <button id="auth-prompt-cancel" type="button" class="prompt-button secondary">Cancel</button>
+            <button id="auth-prompt-submit" type="submit" class="prompt-button primary">Sign in</button>
           </div>
         </form>
       </dialog>

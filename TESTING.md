@@ -1,30 +1,41 @@
 # Chroma Testing
 
 This document separates automated evidence from manual acceptance for the
-current Chromium/Electron rewrite. It records the evidence available on
-2026-07-16; a later code, dependency, Electron, operating-system, or baseline
-change requires the relevant gates to be rerun.
+current Chromium/Electron rewrite. `check`, `window-lifecycle-smoke`,
+`session-smoke`, `smoke`, `performance`, and `verify` were rerun on
+2026-07-18 after the schema-9 live-folder, split-ratio preset, bookmark
+import/export, media-control, extension-popup, nested bookmark-folder,
+bookmark drag-and-drop, hardware media-key, HTTP-auth prompt, MediaSession-artwork, site-information, Essential reset/unload, per-tab UA-override, bookmark
+address-suggestion, per-container proxy, per-container User-Agent, and bookmark search/rename changes; `visual`,
+`visual`, `package-smoke`, and `npm audit` were also rerun on 2026-07-18.
+The visual baselines were intentionally reviewed and refreshed for the new
+bookmark-search and live-folder rows before a clean comparison pass. Only the
+unlocked desktop GUI acceptance session below still reflects 2026-07-16. A
+later code, dependency, Electron, operating-system, or baseline change requires
+the relevant gates to be rerun.
 
 ## Current evidence snapshot
 
 | Gate | Current result | What it establishes |
 |---|---:|---|
-| `npm run check` | Passed | Syntax checks plus 203 Node tests: 203 passed, 0 failed, 0 skipped |
+| `npm run check` | Passed | Syntax checks plus 314 Node tests: 314 passed, 0 failed, 0 skipped |
 | `npm run window-lifecycle-smoke` | Passed | Eight concurrent startup URLs, one live window, failed-window cleanup, and queued-URL recovery |
-| `npm run session-smoke` | Passed | Four launches against one profile, schema-6 topology restore, and persisted dark/light/system Appearance transitions |
+| `npm run session-smoke` | Passed | Four launches against one profile, schema-13 topology restore, and persisted dark/light/system Appearance transitions |
 | `npm run smoke` | Passed | The full isolated Electron runtime report completed with every reported capability flag set to `true` |
 | `npm run performance` | Passed | Local-fixture startup and one/eight-tab process-tree RSS remained below every configured ceiling |
 | `npm run verify` | Passed | The five host gates above passed serially in the order defined by `package.json` |
-| `npm run visual` | Passed | Seven Darwin/Electron-43 software-raster scenes passed with no geometry differences and at most 0.0062% raster difference |
-| `npm run package-smoke` | Passed | The unsigned macOS bundle satisfied its ASAR allow-list, branded-icon and license-resource checks, then started through the real packaged preload bridge |
-| `npm audit --ignore-scripts` | Passed | npm reported 0 known vulnerabilities for the resolved lockfile snapshot |
-| Unlocked desktop GUI acceptance | **Partial** | The packaged app launched without a JavaScript-error dialog, completed new-tab search and direct address navigation to Baidu, and passed sidebar collapse, edge reveal, overlay, and restore checks while the live page remained visible |
+| `npm run visual` | Passed (2026-07-18) | Seven Darwin/Electron-43 software-raster scenes passed with zero changed pixels and no geometry differences after the reviewed baseline refresh |
+| `npm run package-smoke` | Passed (2026-07-18) | The unsigned macOS bundle satisfied its ASAR allow-list, branded-icon and license-resource checks, then started through the real packaged preload bridge |
+| `npm audit --ignore-scripts` | Passed (2026-07-18) | npm reported 0 known vulnerabilities for the resolved lockfile snapshot |
+| Unlocked desktop GUI acceptance | **Partial** (2026-07-16) | The packaged app launched without a JavaScript-error dialog, completed new-tab search and direct address navigation to Baidu, and passed sidebar collapse, edge reveal, overlay, and restore checks while the live page remained visible |
 
-The current 203-test count comes from `node --test test/*.test.mjs`. It is not a
-claim that 203 user-visible features exist, and it is not a replacement for the
-Electron or manual gates. An earlier schema-6/Appearance checkpoint recorded
-125/125; that number is retained here only as historical evidence and is not
-the current suite result.
+The current 314-test count comes from `node --test test/*.test.mjs`, up from
+245 after adding live-folder, split-ratio preset, bookmark import/export,
+media-control, and extension-action-popup coverage.
+It is not a claim that 314 user-visible features exist, and it is
+not a replacement for the Electron or manual gates. An earlier schema-6/
+Appearance checkpoint recorded 125/125; that number is retained here only as
+historical evidence and is not the current suite result.
 
 ## `npm run verify`
 
@@ -41,10 +52,30 @@ npm run check
 ### Static and unit gate
 
 `npm run check` syntax-checks the main entry, controller, process-output guard,
-and preload before running the Node test suite. The current 203 tests cover the
+and preload before running the Node test suite. The current 314 tests cover the
 state schema and repair rules, navigation and fixed search-provider policy,
 history, downloads, command search, page zoom, startup-policy core, split ratio
-trees, folder and pinned/Essential invariants, renderer/preload contracts,
+trees, folder and pinned/Essential invariants (including Essential saved-page
+capture/reset/clearing and unload-revive), bookmark-folder topology repair
+(including nested-parent cycle breaking and depth capping) and controller
+commands (nested create/move/delete with descendant and depth guards), Netscape bookmark HTML serialization/parsing and
+import/export commands (folder reuse, duplicate skip, unsafe-link drop), container sanitization/partition isolation/deletion/proxy policy (rule normalization, per-partition `setProxy` application, launch reapply, and delete-time reset)/user-agent policy (printable-ASCII normalization, live-member re-identification with per-tab override precedence, and new-view inheritance)/
+reopen-in-container commands, per-origin site-data clearing scoped to the
+tab's own partition, per-tab UA-mode overrides (pin/no-op/auto semantics,
+discarded-tab refusal, close-time cleanup), extension-service registry/install/remove/
+reload/boot-replay behavior, extension action-popup lifecycle (toggle,
+Escape close, link-to-tab routing, root-escape rejection) and action-icon
+embedding bounds (raster-only, in-root, size-capped), live-folder feed parsing/fetch bounds and
+rate-limited refresh commands, split-ratio preset application/bounds,
+media playback/PiP command contracts (user-gesture scripts, null collapse,
+discarded/crashed-tab refusal) and now-playing tracking (media-tab registry,
+MediaSession metadata and artwork-validation reads, closed-tab pruning,
+hardware media-key
+registration/release and recency-ordered targeting), HTTP-auth challenge
+queuing (FIFO surfacing, credential pass-through bounds, double-answer and
+teardown cancellation), manual tab unloading with view destruction and
+selection restore, Glance preview lifecycle (open/close/promote, unsafe-URL
+rejection, auto-close on tab switch), renderer/preload contracts,
 workspace deletion/reorder/tab-movement invariants, exact shared shortcut
 routing (including unavailable actions, overlay focus, and destroyed views),
 renderer-crash recovery, the 512-tab Space-movement guard, security boundaries,
@@ -74,12 +105,12 @@ and recovery after an injected creation failure.
 ### Session smoke
 
 The session smoke launches Chroma four times with one temporary profile. It
-verifies schema-6 workspace, tab, folder, split, and sidebar restoration; that
+verifies schema-8 workspace, tab, folder, split, and sidebar restoration; that
 an external startup URL creates a tab without replacing restored topology; and
 that dark, light, then system themes survive restarts with native color-scheme
 propagation. It also restores the Reduce transparency value and Space colors.
 The final state contained two restored folders and one restored split group at
-schema 6.
+schema 8.
 The current folder-specific report records
 `restoredEmptyFolder`, `restoredFolderMembership`,
 `removedFolderStayedDeleted`, and
@@ -90,9 +121,49 @@ deleted after restart.
 ### Runtime smoke
 
 The runtime smoke starts the actual Electron host with deterministic local page
-fixtures. Its report covers the bridge, navigation, command palette, bookmarks,
-history, downloads, tab/workspace/folder lifecycle, split insertion/reorder/
-detach and live ratios, native page bounds, adaptive narrow panes, sidebar
+fixtures. Its report covers the bridge, navigation, command palette, bookmarks
+and bookmark folders (create/rename/delete, move-in/move-out, delete-ungroups,
+remove-cleans-membership, rename with trim/cap/blank rejection, sidebar search filtering titles and URLs into a flat cross-folder result list with Escape-to-clear), bookmark export to a parseable Netscape HTML file
+and import that recreates a nested folder tree while skipping an
+already-saved URL, with folder move-to-top and self-parent rejection
+verified live, pointer drag-and-drop filing a bookmark into a folder (with
+drop-target highlight asserted mid-drag) and nesting a folder into another, live folders (created from a local RSS fixture,
+feed-title adoption, item rendering and open-as-tab, immediate re-refresh
+rejected by the rate limit, persisted items on disk, rename and delete
+reflected in the sidebar), containers (create/rename/delete through the
+bridge, per-container partition isolation proven by same-origin localStorage
+staying invisible across partitions, reopen-in-container replacing a live tab
+under the container partition, container tab indicator UI, tab closure
+and persistence on delete), unpacked-extension install/remove with a real
+MV3 content script observed executing and then no longer executing, its
+action popup opened and closed as a real chrome-extension:// target with a
+data-URI icon button rendered in the sidebar toolbar, manual
+tab unloading with dimmed sidebar state and live-view restoration on
+selection, a Glance preview loading as a real page target without a tab
+record and promoting into the active tab, media playback toggled on a real
+captureStream video with MediaSession title/artist/artwork surfaced through the
+now-playing query and popover thumbnail, with clean null reporting on
+media-free pages,
+a never-visited imported bookmark surfacing as the star-tagged first
+suggestion under the search row for a title query (a URL absent from
+history, so the row can only come from the bookmark store),
+a container-pinned SOCKS proxy routing container traffic into a local TCP
+probe and releasing it when the rule is cleared (with the invalid-scheme
+rejection and containers-menu badge asserted alongside),
+a container-pinned User-Agent surfacing verbatim in a page that titles
+itself from navigator.userAgent, persisting to disk, and reverting to the
+default identity when cleared,
+Request-mobile-site pinning a mobile identity through the real tab menu
+(fixture titles prove the UA change and the return to automatic), the
+Essentials context menu resetting a navigated-away Essential to its
+saved page and unloading it with a dimmed grid item and live revival on
+selection, the site-information popover reporting an unencrypted fixture and its
+confirmed clear-site-data wiping localStorage (proven by the reloaded
+page's title), an HTTP Basic 401 challenge answered through the real shell dialog (title
+proves the Authorization header arrived) and a cancelled challenge showing
+the server's error page, history, downloads, tab/workspace/folder lifecycle, split insertion/reorder/
+detach and live ratios plus preset application with out-of-bounds rejection,
+native page bounds, adaptive narrow panes, sidebar
 collapse/overlay, traffic lights, sandboxing, permission boundaries, output-pipe
 failure handling, view destruction, and clean window close. It now sends real
 DevTools key events to both shell and page targets, proving that a valid
@@ -122,10 +193,10 @@ The final `verify` stage launches a fresh Electron process against tiny local
 fixtures and records process-launch shell readiness, first-page readiness, and
 settled process-tree RSS with one and eight loaded tabs. RSS uses the median of five
 samples after a one-second settling interval; process counts and peaks are
-diagnostic. The current Darwin arm64 report records 857.2 ms shell-ready,
-1,208.0 ms first-local-page-ready, 725.5 MiB one-tab RSS, 1,369.9 MiB eight-tab
-RSS, and a 644.4 MiB delta. These are below the configured 20/25-second and
-900/1,800/1,100-MiB ceilings.
+diagnostic. The current Darwin arm64 report (2026-07-17) records 570.9 ms
+shell-ready, 770.3 ms first-local-page-ready, 719.7 MiB one-tab RSS, 1,319.5
+MiB eight-tab RSS, and a 599.8 MiB delta. These are below the configured
+20/25-second and 900/1,800/1,100-MiB ceilings.
 
 The gate uses software rendering and `ps` process-tree sampling, and its local
 fixture deliberately excludes real network and complex-site cost. It is a
@@ -181,9 +252,9 @@ packaged executable with a temporary profile, and calls
 `window.chromaBrowser.getState()` through the packaged preload. The current
 generated report is `artifacts/package/package-smoke.json`.
 
-The passing report identifies `dist/mac-arm64/Chroma.app`, records 29 ASAR
-entries and all 24 required entries, and confirms the current runtime allow-list
-(including `src/shared/shortcut-registry.mjs`), an available preload bridge,
+The passing report identifies `dist/mac-arm64/Chroma.app`, records 32 ASAR
+entries and all 27 required entries, and confirms the current runtime allow-list
+(including the extension, feed, bookmark-I/O, and shortcut modules), an available preload bridge,
 one initial tab, Electron 43.1.0, and no fatal startup output. It also confirms
 that the packaged original `build/icon.icns` is branded and has SHA-256
 `986ff64959f96141dfd562ec2d2c8ffdc2fac51a054d3304f4991eb2aef41907`,

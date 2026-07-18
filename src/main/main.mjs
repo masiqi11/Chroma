@@ -474,6 +474,10 @@ async function createBrowserWindowOnce() {
       applyAppearance(appearance) {
         applyWindowAppearance(window, appearance);
       },
+      extensionRegistryFile: path.join(
+        app.getPath("userData"),
+        "chroma-extensions.json"
+      ),
     });
     // Cache this while the BrowserWindow is alive. Electron invalidates the
     // webContents accessor before emitting `closed`.
@@ -580,6 +584,17 @@ if (hasSingleInstanceLock) {
     .catch(error => {
       if (!quitting) console.error("Unable to create browser window:", error);
     });
+
+  app.on("login", (event, _contents, _details, authInfo, callback) => {
+    // Electron cancels HTTP auth challenges by default. Route them to the
+    // live controller's shell prompt; if no controller can take the
+    // challenge (e.g. during shutdown), cancel it explicitly.
+    event.preventDefault();
+    for (const controller of new Set(controllers.values())) {
+      if (controller?.handleAuthRequest(authInfo, callback)) return;
+    }
+    callback();
+  });
 
   app.on("second-instance", (_event, commandLine) => {
     enqueuePageUrls(pageUrlsFromArguments(commandLine));

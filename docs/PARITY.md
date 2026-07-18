@@ -27,24 +27,24 @@ notice work is tracked in
 | compact sidebar overlay | Current | configurable timing, right-edge mode, multi-window coordination, broader visual regression coverage |
 | appearance / Space color | Current | automatic OS Reduce Transparency integration, per-window themes, presets, and cross-platform native-material/visual QA |
 | navigation / address-search | Basic | provider settings, Chromium Omnibox providers, complete command/action model, certificate/security UI |
-| tab lifecycle | Current | discard policy, cross-window moves, crash reporting/telemetry, direct Chromium `TabStripModel` integration if pursued |
+| tab lifecycle | Current | manual context-menu unloading destroys a background tab's view and restores it on selection; automatic discard policy, cross-window moves, crash reporting/telemetry, and direct Chromium `TabStripModel` integration remain |
 | workspaces | Basic | create/switch/delete, drag reorder, and eligible-tab moves are implemented; bookmark/container relationships, keyboard reordering, cross-window propagation, and richer management UI remain |
-| Essentials | Basic | reset/unload semantics, richer metadata, workspace/global policy |
+| Essentials | Basic | each Essential remembers the page it was promoted on (schema 11), and its context menu offers Reset to saved page (reviving an unloaded view first), Unload, and Remove; unloaded Essentials dim in the grid. Richer metadata and workspace/global scoping policy remain |
 | folders | Basic | nesting, search, bulk lifecycle actions, convert-to-workspace behavior |
-| live folders | Planned | provider model, background refresh, privacy and rate-limit policy |
-| split view | Basic | ratio presets, per-pane desktop/mobile override, complete focus/fullscreen/PiP/capture/permission semantics |
+| live folders | Basic | RSS/Atom feed folders in the sidebar with create-from-URL, feed-title adoption, item open-in-tab, rename/collapse/delete, error surfacing, background staleness refresh, and a per-folder rate limit (30 s manual, 15 min automatic); fetches run credential-free in the main process. Additional providers (e.g. site-query folders), per-folder refresh settings, unread markers, and notification policy remain |
+| split view | Basic | ratio presets exist (50/50, 70/30, 30/70 from the command palette plus divider double-click balance; the root divider takes the preset and nested dividers equalize), and each tab can pin Request Mobile/Desktop Site from its context menu (the override suspends the automatic narrow-pane adaptation until "auto" returns); complete focus/fullscreen/PiP/capture/permission semantics remain |
 | split capsule | Current | additional accessibility and keyboard reordering; active group mirrors two-to-four-pane geometry and inactive groups compact to one row |
-| transient preview pages | Planned | parent lifecycle, overlay WebContents, expand/split conversion, permission behavior |
-| media controls | Planned | MediaSession metadata, transport, PiP, and capture indicators |
+| transient preview pages | Basic | a Glance overlay previews a page-context-menu link above the active tab (Esc closes, Primary+Enter or glance:promote expands to a real tab, tab/workspace switch auto-closes, unsafe URLs rejected); split conversion, a visible shell frame/dim treatment, history/permission policy for previews, and keyboard discoverability remain |
+| media controls | Basic | play/pause toggle and Picture-in-Picture run as user-gesture script commands from the palette and the page's media context menu; a toolbar now-playing control appears once any tab produces media and lists each media tab with its MediaSession title/artist, play-pause, mute, and jump-to-tab; per-tab audio indicator and mute stay in the tab strip; the hardware play/pause media key toggles the most recently playing media tab when the OS grants the registration (refusal degrades silently); MediaSession artwork shows as a validated thumbnail (largest declared size, http(s) or bounded raster data URIs only) in the now-playing rows. Next/previous-track transport and capture indicators remain |
 | downloads | Current | danger/reputation UI, richer filtering/history views, and direct Chromium DownloadManager integration if pursued |
-| permissions / site information | Basic | persistent Chromium PermissionManager policy, certificate, site-data, device, and extension panels |
+| permissions / site information | Basic | the address-bar security chip opens a site-information popover (hostname, encrypted/not-encrypted/internal statement, container membership, ask-on-demand permission note, copy address, and confirmed per-origin clear-site-data that wipes the tab's own partition and reloads); persistent Chromium PermissionManager policy, certificate details, device, and extension panels remain |
 | local history | Current | replace the local JSON service with production Chromium `HistoryService` integration; add profile/sync policy and richer favicon/settings surfaces |
-| bookmarks | Basic | local star/unstar, sidebar listing, open/remove, and profile persistence are implemented; folders, richer management, address-bar integration, and import/export remain |
+| bookmarks | Basic | local star/unstar, sidebar listing, open/remove, nested bookmark folders (create/rename/delete/move with an 8-level depth cap, cycle-breaking topology repair, child promotion on delete), Netscape-HTML import/export interoperable with Chrome/Firefox/Zen (nested folder structure preserved both ways, duplicates skip, unsafe links drop), and profile persistence are implemented; pointer drag-and-drop moves bookmarks into/out of folders and folders into folders with live drop-target highlighting, and saved bookmarks surface in the address-bar suggestions (star-tagged rows ranked directly under the search row, deduplicated against history). The sidebar has a bookmark search field (title/URL substring match rendering matches as a flat list across folders, Escape clears) and bookmarks can be renamed from their action menu (trimmed, 500-char cap). Multi-select management remains |
 | command palette | Current | a visible shell control, CJK/English ranked search, contextual availability, keyboard navigation, and safe action adapters are wired; a user-configurable shortcut, user-defined commands, and extension actions remain |
 | browser shortcuts | Current | one exact-match registry routes shell/page/overlay input and supplies platform menu/palette labels; remapping, shortcut settings/conflict UI, catalog-action alignment, Zen grid/numeric-Space chords, AltGr/platform normalization, private-window behavior, and full native-platform acceptance remain |
-| passwords / autofill / WebAuthn | Planned | integrate mature Chromium services and native security UI; do not implement secrets in shell JavaScript |
-| Chrome extensions | Planned | direct extension-system host, action popup, MV3 worker, tabs/storage/DNR/native-messaging coverage |
-| containers / isolated identities | Planned | storage-partition model that preserves explicitly shared services |
+| passwords / autofill / WebAuthn | Planned | HTTP Basic/Proxy authentication now prompts through a host-owned shell dialog (challenges queue FIFO, credentials pass straight to Chromium's network stack and are never persisted, teardown cancels cleanly); password storage, form autofill, and WebAuthn remain — integrate mature Chromium services and native security UI; do not implement secret storage in shell JavaScript |
+| Chrome extensions | Basic | unpacked MV3 extensions load into the main partition through Electron's extension host, persist across launches via a JSON registry, and can be installed/reloaded/removed from the sidebar Extensions control; content-script execution is smoke-verified. Action popups open as transient overlays (extension-origin documents only, Escape closes, links route to real tabs, popup paths escaping the extension root are rejected), and popup-capable extensions get a toolbar icon button whose manifest icon is embedded as a bounded data URI (in-root raster files only, 128 KiB cap). Packed .crx/Web Store installs, container-partition loading, and complete chrome.* API coverage (DNR, native messaging, identity) remain |
+| containers / isolated identities | Basic | per-container persistent partitions with create/rename/color/delete, new-tab-in-container, reopen-in/out-of-container from the tab context menu, tab color indicator, tab-close on delete, and partition storage clearing are implemented. Each container can pin a proxy endpoint (`http`/`https`/`socks4`/`socks5` `scheme://host:port`, no credentials) that is applied to its Chromium partition via `session.setProxy`, restored at launch, badged in the containers menu, and returned to the system proxy on clear or container delete. Each container can also pin a User-Agent string (printable ASCII, 512-char cap) that live member tabs adopt with a cache-bypassing reload, new views inherit at creation, mobile auto-adaptation stands down for, and an explicit per-tab Request Mobile/Desktop override still outranks; container-scoped bookmarks/history relationships and richer management UI remain |
 | session restoration | Basic | multi-window restore and reconciliation, dirty-session recovery UX, production Chromium session services |
 | state repair / host lifecycle | Current | broader corruption fuzzing, multi-window ownership, and crash-reporting integration |
 | startup / memory regression gate | Current | one/eight-tab local-fixture startup and RSS ceilings are automated on macOS/Linux; Windows sampling, GPU/native-material cost, long-session leaks, interaction latency, CPU, and energy remain |
@@ -121,12 +121,17 @@ release checklist remain open in [`../TESTING.md`](../TESTING.md).
   shell surfaces for opaque rounded materials while preserving the floating
   sidebar shape and leaving page content untouched.
 - Starring an HTTP(S) page persists a local bookmark and updates the navigation
-  action and sidebar. A bookmark can be reopened or removed; unsafe URLs are not
-  accepted. Bookmark folders and import/export are outside this slice.
-- The profile uses schema version 6. Its bounded history shape was introduced in
-  schema 3, terminal download metadata in schema 4, the sanitized split ratio
-  tree in schema 5, and Appearance preferences in schema 6. Space colors remain
-  on their workspaces. History remains behind a dedicated main-process
+  action and sidebar. Bookmarks support eight-level nested folders, pointer
+  drag-and-drop, rename/search, address-bar suggestions, and Netscape HTML
+  import/export; unsafe URLs are rejected and multi-select management remains.
+- The profile uses schema version 13. Its bounded history shape was introduced
+  in schema 3, terminal download metadata in schema 4, the sanitized split ratio
+  tree in schema 5, Appearance preferences in schema 6, bookmark folders in
+  schema 7, isolated container identities in schema 8, feed-backed live folders
+  in schema 9, nested bookmark folders in schema 10, Essential saved pages in
+  schema 11, container proxy policy in schema 12, and container User-Agent
+  policy in schema 13. Space colors remain on their workspaces. History remains
+  behind a dedicated main-process
   service. The shell panel supports bounded local search, date groups,
   pagination, individual and
   selection deletion, confirmed custom/range/all-time clearing, persistent
@@ -218,7 +223,7 @@ similarity to Arc or Zen.
 The split-ratio core, download service, command-search core, and Appearance
 surface are connected to the browser host. Ratio previews resize real native
 views without writing the profile, schema-5 ratio layouts remain persisted in
-the current schema-6 profile, downloads attach to the real Electron Session,
+the current schema-13 profile, downloads attach to the real Electron Session,
 and the command palette and Appearance panel remain shell-owned surfaces.
 
 Appearance runtime checks establish validated state changes, Electron

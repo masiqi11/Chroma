@@ -4,8 +4,11 @@ import {
 } from "./appearance.mjs";
 import { isSafePageUrl } from "./navigation.mjs";
 import {
+  BOOKMARK_FOLDER_LIMIT,
+  BOOKMARK_FOLDER_MEMBER_LIMIT,
   FOLDER_MEMBER_LIMIT,
   LIBRARY_CONTAINER_LIMIT,
+  repairBookmarkTopology,
   repairLibraryTopology,
 } from "./state-invariants.mjs";
 import {
@@ -13,7 +16,17 @@ import {
   splitLayoutPaneIds,
 } from "./split-ratios.mjs";
 
-export const STATE_SCHEMA_VERSION = 6;
+export const STATE_SCHEMA_VERSION = 13;
+
+export const CONTAINER_LIMIT = 64;
+export const CONTAINER_PROXY_MAX_LENGTH = 256;
+export const CONTAINER_USER_AGENT_MAX_LENGTH = 512;
+// Container IDs become Chromium storage-partition names, so they are held to
+// a strict filesystem-safe charset instead of the general entity-ID rules.
+const CONTAINER_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
+
+export const LIVE_FOLDER_LIMIT = 16;
+export const LIVE_FOLDER_ITEM_LIMIT = 30;
 
 export const HISTORY_ENTRY_LIMIT = 10_000;
 export const ENTITY_ID_MAX_LENGTH = 199;
@@ -316,6 +329,95 @@ function sanitizeLibraryContainers(
   };
 }
 
+/**
+ * Sanitizes bookmark folders against the already-deduplicated bookmark list.
+ * Unlike tab folders, bookmark folders are global and reference only
+ * bookmarks (a single, self-contained entity type), so no cross-entity ID
+ * namespace reservation against workspaces/tabs is needed here.
+ */
+function sanitizeBookmarkFolders(candidateFolders, bookmarks, idFactory) {
+  const folderCandidates = (Array.isArray(candidateFolders) ? candidateFolders : [])
+    .slice(0, BOOKMARK_FOLDER_LIMIT)
+    .map(item =>
+      item && typeof item === "object"
+        ? {
+            id: normalizeEntityId(item.id),
+            name: normalizeFolderName(item.name),
+            parentId: normalizeEntityId(item.parentId),
+            bookmarkIds: Array.isArray(item.bookmarkIds)
+              ? item.bookmarkIds
+                  .slice(0, BOOKMARK_FOLDER_MEMBER_LIMIT)
+                  .map(normalizeEntityId)
+                  .filter(Boolean)
+              : [],
+            expanded: asBoolean(item.expanded, true),
+          }
+        : item
+    );
+
+  return repairBookmarkTopology(
+    { bookmarks, bookmarkFolders: folderCandidates },
+    idFactory
+  ).bookmarkFolders;
+}
+
+/**
+ * Normalizes a live-folder feed source. Only http(s) documents may act as
+ * providers; credentials and fragments are stripped like every other stored
+ * page URL.
+ */
+export function normalizeLiveFolderSourceUrl(value) {
+  return normalizeHttpUrl(value, TAB_URL_MAX_LENGTH);
+}
+
+/**
+ * Sanitizes live folders. They are self-contained (items are plain
+ * title/url pairs, not references to other entities), so no topology repair
+ * is needed — only caps, URL safety, and ID/source uniqueness.
+ */
+function sanitizeLiveFolders(candidateFolders, idFactory, now) {
+  const ids = new Set();
+  const sourceUrls = new Set();
+  const folders = [];
+  for (const item of (Array.isArray(candidateFolders) ? candidateFolders : [])
+    .slice(0, LIVE_FOLDER_LIMIT)) {
+    if (!item || typeof item !== "object") continue;
+    const sourceUrl = normalizeLiveFolderSourceUrl(item.sourceUrl);
+    if (!sourceUrl || sourceUrls.has(sourceUrl)) continue;
+    let id = normalizeEntityId(item.id);
+    if (!id || ids.has(id)) {
+      id = nextUniqueId(idFactory, ids, "live-folder");
+    }
+    ids.add(id);
+    sourceUrls.add(sourceUrl);
+    const itemUrls = new Set();
+    const items = [];
+    for (const entry of Array.isArray(item.items) ? item.items : []) {
+      if (items.length === LIVE_FOLDER_ITEM_LIMIT) break;
+      if (!entry || typeof entry !== "object") continue;
+      const url = normalizeHttpUrl(entry.url, TAB_URL_MAX_LENGTH);
+      if (!url || itemUrls.has(url)) continue;
+      itemUrls.add(url);
+      items.push({
+        url,
+        title: asString(entry.title, url).trim().slice(0, 300) || url,
+      });
+    }
+    folders.push({
+      id,
+      name: normalizeFolderName(item.name),
+      sourceUrl,
+      expanded: asBoolean(item.expanded, true),
+      items,
+      refreshedAt: Number.isFinite(item.refreshedAt)
+        ? Math.min(Math.max(item.refreshedAt, 0), now)
+        : 0,
+      status: item.status === "error" ? "error" : "ok",
+    });
+  }
+  return folders;
+}
+
 function historyPreferences(candidate) {
   return {
     recordingEnabled: asBoolean(
@@ -479,6 +581,90 @@ export function sanitizeHistory(candidate, idFactory, { now = Date.now() } = {})
   };
 }
 
+export function isPartitionSafeContainerId(value) {
+  return typeof value === "string" && CONTAINER_ID_PATTERN.test(value);
+}
+
+/**
+ * Normalizes a per-container User-Agent override. The value is applied
+ * verbatim to page requests, so it is held to printable ASCII (header-safe,
+ * no control characters) and a bounded length. Returns "" when unusable.
+ */
+export function normalizeContainerUserAgent(value) {
+  if (typeof value !== "string") return "";
+  const text = value.trim();
+  if (!text || text.length > CONTAINER_USER_AGENT_MAX_LENGTH) return "";
+  if (!/^[\x20-\x7e]+$/.test(text)) return "";
+  return text;
+}
+
+const CONTAINER_PROXY_SCHEMES = new Set(["http", "https", "socks4", "socks5"]);
+
+/**
+ * Normalizes a per-container proxy rule to `scheme://host:port`. The value is
+ * handed to Chromium's `session.setProxy` as `proxyRules`, so only a single
+ * explicit endpoint with a known proxy scheme is admitted — no credentials,
+ * paths, or multi-rule strings. Returns "" when the value is unusable.
+ */
+export function normalizeContainerProxy(value) {
+  if (typeof value !== "string") return "";
+  const text = value.trim();
+  if (!text || text.length > CONTAINER_PROXY_MAX_LENGTH) return "";
+  let parsed;
+  try {
+    parsed = new URL(text);
+  } catch {
+    return "";
+  }
+  const scheme = parsed.protocol.slice(0, -1).toLowerCase();
+  if (!CONTAINER_PROXY_SCHEMES.has(scheme)) return "";
+  if (parsed.username || parsed.password || parsed.search || parsed.hash) return "";
+  if (parsed.pathname && parsed.pathname !== "/") return "";
+  if (!parsed.hostname) return "";
+  // URL drops a special scheme's default port; SOCKS endpoints have no default.
+  const port = parsed.port
+    ? Number(parsed.port)
+    : scheme === "http" ? 80 : scheme === "https" ? 443 : Number.NaN;
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return "";
+  return `${scheme}://${parsed.hostname}:${port}`;
+}
+
+/**
+ * Sanitizes the global container list. Container IDs must stay
+ * partition-safe because they name persistent Chromium storage partitions;
+ * an unsafe or colliding stored ID is regenerated rather than trimmed, since
+ * renaming a partition would silently detach its on-disk site data.
+ */
+function sanitizeContainers(candidateContainers, idFactory) {
+  const usedIds = new Set();
+  const containers = [];
+  for (const item of Array.isArray(candidateContainers) ? candidateContainers : []) {
+    if (containers.length >= CONTAINER_LIMIT) break;
+    if (!item || typeof item !== "object") continue;
+    let id = isPartitionSafeContainerId(item.id) ? item.id : "";
+    if (!id || usedIds.has(id)) {
+      for (let attempt = 0; attempt < 100 && (!id || usedIds.has(id)); attempt += 1) {
+        const generated = normalizeEntityId(idFactory());
+        id = isPartitionSafeContainerId(generated) ? generated : "";
+      }
+      let suffix = 1;
+      while (!id || usedIds.has(id)) {
+        const fallback = `container-${suffix++}`;
+        id = usedIds.has(fallback) ? "" : fallback;
+      }
+    }
+    usedIds.add(id);
+    containers.push({
+      id,
+      name: asString(item.name).trim().slice(0, 80) || "Container",
+      color: normalizeWorkspaceColor(item.color, "#7cc4ff"),
+      proxy: normalizeContainerProxy(item.proxy),
+      userAgent: normalizeContainerUserAgent(item.userAgent),
+    });
+  }
+  return containers;
+}
+
 export function normalizeWorkspaceColor(value, fallback = "#e4a8ff") {
   const color = asString(value).trim();
   return /^#[\da-f]{6}$/i.test(color) ? color.toLowerCase() : fallback;
@@ -506,13 +692,16 @@ export function createDefaultState(idFactory) {
       {
         id: tabId,
         workspaceId,
+        containerId: "",
         url: "chroma://newtab/",
         title: "New Tab",
         favicon: "",
         essential: false,
+        essentialUrl: "",
         pinned: false,
         muted: false,
         audible: false,
+        discarded: false,
         loading: false,
         crashed: false,
         canGoBack: false,
@@ -522,8 +711,11 @@ export function createDefaultState(idFactory) {
     ],
     folders: [],
     splitGroups: [],
+    containers: [],
     history: createDefaultHistory(),
     bookmarks: [],
+    bookmarkFolders: [],
+    liveFolders: [],
     downloads: [],
     settings: {
       sidebarWidth: 228,
@@ -567,6 +759,9 @@ export function sanitizeState(candidate, idFactory, { now = Date.now() } = {}) {
     return createDefaultState(idFactory);
   }
 
+  const containers = sanitizeContainers(candidate.containers, idFactory);
+  const containerIds = new Set(containers.map(container => container.id));
+
   const tabIds = new Set();
   const tabs = [];
   for (const item of (Array.isArray(candidate.tabs) ? candidate.tabs : []).slice(
@@ -581,17 +776,23 @@ export function sanitizeState(candidate, idFactory, { now = Date.now() } = {}) {
       : workspaces[0].id;
     const url = normalizeTabUrl(item?.url);
     const essential = asBoolean(item?.essential);
+    const essentialUrl = essential
+      ? normalizeHttpUrl(item?.essentialUrl, TAB_URL_MAX_LENGTH) || ""
+      : "";
     tabIds.add(id);
     tabs.push({
       id,
       workspaceId,
+      containerId: containerIds.has(item?.containerId) ? item.containerId : "",
       url,
       title: asString(item?.title, "New Tab").slice(0, 500),
       favicon: normalizeTabFavicon(item?.favicon),
       essential,
+      essentialUrl,
       pinned: essential || asBoolean(item?.pinned),
       muted: asBoolean(item?.muted),
       audible: false,
+      discarded: false,
       loading: false,
       crashed: false,
       canGoBack: false,
@@ -623,13 +824,16 @@ export function sanitizeState(candidate, idFactory, { now = Date.now() } = {}) {
       tabs.push({
         id,
         workspaceId: workspace.id,
+        containerId: "",
         url: "chroma://newtab/",
         title: "New Tab",
         favicon: "",
         essential: false,
+        essentialUrl: "",
         pinned: false,
         muted: false,
         audible: false,
+        discarded: false,
         loading: false,
         crashed: false,
         canGoBack: false,
@@ -724,6 +928,14 @@ export function sanitizeState(candidate, idFactory, { now = Date.now() } = {}) {
     });
   }
 
+  const bookmarkFolders = sanitizeBookmarkFolders(
+    candidate.bookmarkFolders,
+    bookmarks,
+    idFactory
+  );
+
+  const liveFolders = sanitizeLiveFolders(candidate.liveFolders, idFactory, now);
+
   const sidebarWidth = Number(candidate.settings?.sidebarWidth);
   const downloads = sanitizeDownloads(candidate.downloads, idFactory, { now });
 
@@ -735,8 +947,11 @@ export function sanitizeState(candidate, idFactory, { now = Date.now() } = {}) {
     tabs,
     folders,
     splitGroups,
+    containers,
     history,
     bookmarks,
+    bookmarkFolders,
+    liveFolders,
     downloads,
     settings: {
       sidebarWidth: Number.isFinite(sidebarWidth)

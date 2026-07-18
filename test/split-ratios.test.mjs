@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   MAX_SPLIT_RATIO,
   MIN_SPLIT_RATIO,
+  applySplitRatioPreset,
   createSplitLayout,
   dragSplitDivider,
   insertSplitPane,
@@ -378,4 +379,34 @@ test("custom ratio rectangles respect the 20%-80% bound", () => {
     { gap: 0, inset: 0 }
   );
   assert.deepEqual(result.frameRects.map(rect => rect.width), [200, 800]);
+});
+
+test("ratio presets set the root divider and equalize nested dividers", () => {
+  const two = applySplitRatioPreset(createSplitLayout(["a", "b"]), 0.7);
+  assert.equal(two.ratio, 0.7);
+  assert.deepEqual(splitLayoutPaneIds(two), ["a", "b"]);
+
+  const nested = setSplitRatio(
+    setSplitRatio(createSplitLayout(["a", "b", "c"]), ["second"], 0.75),
+    [],
+    0.25
+  );
+  const preset = applySplitRatioPreset(nested, 0.7);
+  assert.equal(preset.ratio, 0.7);
+  assert.equal(preset.second.ratio, 0.5, "nested dividers return to 50/50");
+  assert.deepEqual(splitLayoutPaneIds(preset), ["a", "b", "c"]);
+});
+
+test("ratio presets clamp to the divider bounds and pass through panes", () => {
+  assert.equal(applySplitRatioPreset(createSplitLayout(["a", "b"]), 0).ratio, MIN_SPLIT_RATIO);
+  assert.equal(applySplitRatioPreset(createSplitLayout(["a", "b"]), 1).ratio, MAX_SPLIT_RATIO);
+  assert.equal(
+    applySplitRatioPreset(createSplitLayout(["a", "b"]), Number.NaN).ratio,
+    0.5
+  );
+  assert.deepEqual(applySplitRatioPreset(createSplitLayout(["solo"]), 0.7), {
+    type: "pane",
+    paneId: "solo",
+  });
+  assert.equal(applySplitRatioPreset(null, 0.7), null);
 });

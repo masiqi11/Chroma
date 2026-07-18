@@ -43,7 +43,7 @@ receives Electron or Node.js objects. Web pages run in separate sandboxed
 
 ## Current module boundaries
 
-- `src/shared/`: navigation normalization, schema-6 state and topology repair,
+- `src/shared/`: navigation normalization, schema-13 state and topology repair,
   split ratio trees, Appearance sanitization, command names, exact shortcut
   definitions, and command search. These modules are host-neutral.
 - `src/renderer/`: Chroma interface. It calls only
@@ -54,6 +54,8 @@ receives Electron or Node.js objects. Web pages run in separate sandboxed
   folders, split groups, navigation, permissions, history/download services,
   Appearance, responsive pane handling, shortcut dispatch, crashed-pane
   recovery, and view lifecycle.
+- `src/main/feed-service.mjs`: dependency-free RSS/Atom parsing and bounded,
+  credential-free feed fetching for live folders.
 - `src/main/state-store.mjs`: atomic, schema-versioned development-session
   persistence.
 - `scripts/runtime-smoke.mjs`: end-to-end host conformance test.
@@ -104,7 +106,7 @@ from the floating sidebar retire that overlay before opening in the main shell.
 | shell bridge | context-isolated IPC preload | Mojo interface plus WebUI `PageHandler` |
 | browser shortcuts | shared registry plus host `before-input-event` router | Chromium accelerator/command controller backed by the same Chroma action IDs |
 | profile | Electron persistent `session` | Chromium `Profile` / `BrowserContext` |
-| container | not implemented | `StoragePartitionConfig` with shared profile services |
+| container | per-container persistent `session.fromPartition` isolation | `StoragePartitionConfig` with shared profile services |
 | history/download/permission | local state and Electron session | Chromium browser services |
 | extensions | intentionally not promised | Chromium `ExtensionSystem` and integrated action UI |
 | session | versioned JSON development store | `SessionService` / `TabRestoreService` plus Chroma metadata |

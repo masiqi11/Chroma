@@ -147,3 +147,84 @@ test("closing and reopening a pinned tab restores its pinned status", async () =
   assert.equal(state.tabs.find(tab => tab.id === reopenedId).pinned, true);
   await controller.destroy();
 });
+
+test("Essentials remember their saved page and reset back to it", async () => {
+  const { controller, state } = createHarness();
+  const { id } = await createTrackedTab(controller, {
+    url: "https://example.com/home",
+  });
+  await createTrackedTab(controller, { url: "https://example.com/other" });
+
+  assert.equal(controller.toggleEssential(id), true);
+  const tab = state.tabs.find(item => item.id === id);
+  assert.equal(tab.essentialUrl, "https://example.com/home");
+
+  assert.equal(controller.navigate(id, "https://example.com/elsewhere"), true);
+  assert.equal(
+    await controller.dispatch(commands.resetEssential, { id }),
+    true
+  );
+  assert.equal(tab.url, "https://example.com/home");
+
+  assert.equal(controller.toggleEssential(id), false);
+  assert.equal(tab.essentialUrl, "", "demoting an Essential clears its saved page");
+  assert.equal(controller.resetEssential(id), false);
+  assert.equal(controller.resetEssential("missing-tab"), false);
+});
+
+test("an unloaded Essential resets by restoring its view first", async () => {
+  const { controller, state } = createHarness();
+  const { id } = await createTrackedTab(controller, {
+    url: "https://example.com/pinned",
+  });
+  const { id: activeId } = await createTrackedTab(controller, {
+    url: "https://example.com/active",
+  });
+  controller.selectTab(activeId);
+  assert.equal(controller.toggleEssential(id), true);
+
+  assert.equal(await controller.discardTab(id), true);
+  const tab = state.tabs.find(item => item.id === id);
+  assert.equal(tab.discarded, true);
+
+  assert.equal(controller.resetEssential(id), true);
+  assert.equal(tab.discarded, false, "reset must revive the discarded view");
+  assert.equal(tab.url, "https://example.com/pinned");
+
+  const internal = await controller.createTab({});
+  controller.selectTab(id);
+  assert.equal(controller.toggleEssential(internal), true);
+  assert.equal(
+    state.tabs.find(item => item.id === internal).essentialUrl,
+    "",
+    "internal pages have no web URL to save"
+  );
+  assert.equal(controller.resetEssential(internal), false);
+});
+
+test("essentialUrl survives disk sanitization only while essential", () => {
+  let nextId = 1;
+  const ids = () => () => `essential-disk-${nextId++}`;
+  const base = createDefaultState(ids());
+  base.tabs[0].essential = true;
+  base.tabs[0].pinned = true;
+  base.tabs[0].essentialUrl = "https://example.com/saved";
+  base.tabs.push({
+    ...base.tabs[0],
+    id: "plain-tab",
+    essential: false,
+    pinned: false,
+    essentialUrl: "https://example.com/leftover",
+  });
+
+  const restored = sanitizeState(base, ids());
+  assert.equal(restored.tabs[0].essentialUrl, "https://example.com/saved");
+  assert.equal(
+    restored.tabs.find(tab => tab.id === "plain-tab").essentialUrl,
+    "",
+    "a non-essential tab must not carry a stale saved page"
+  );
+
+  base.tabs[0].essentialUrl = "javascript:alert(1)";
+  assert.equal(sanitizeState(base, ids()).tabs[0].essentialUrl, "");
+});

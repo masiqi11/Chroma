@@ -149,7 +149,7 @@ test("folder actions rename safely and confirm container-only deletion", async (
   assert.match(menuBody, /data-action="folder-delete"/);
   assert.match(menuBody, /event\.key === "ArrowDown"/);
   assert.match(menuBody, /event\.key === "Escape"/);
-  assert.match(promptBody, /Math\.max\(1, Math\.min\(80, maxLength\)\)/);
+  assert.match(promptBody, /Math\.max\(1, Math\.min\(512, maxLength\)\)/);
   assert.match(promptBody, /textPromptInput\.value\.trim\(\)\.slice\(0, boundedMaxLength\)/);
   assert.match(promptBody, /function requestConfirmation/);
   assert.match(promptBody, /textPrompt\.setAttribute\("aria-describedby", "text-prompt-description"\)/);

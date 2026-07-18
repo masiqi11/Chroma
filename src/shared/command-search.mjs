@@ -103,6 +103,14 @@ export function normalizeCommandItem(candidate) {
     throw new TypeError("command enabled must be a boolean or function");
   }
 
+  const payload = candidate.payload ?? null;
+  if (
+    payload !== null &&
+    (typeof payload !== "object" || Array.isArray(payload))
+  ) {
+    throw new TypeError("command payload must be a plain object");
+  }
+
   return Object.freeze({
     id: requiredString(candidate.id, "id"),
     title: requiredString(candidate.title, "title"),
@@ -113,6 +121,7 @@ export function normalizeCommandItem(candidate) {
     keywords: stringList(candidate.keywords, "keywords"),
     shortcut: optionalString(candidate.shortcut, "shortcut"),
     icon: optionalString(candidate.icon, "icon"),
+    payload: payload === null ? null : Object.freeze(structuredClone(payload)),
     enabled,
   });
 }
@@ -229,6 +238,59 @@ export const DEFAULT_BROWSER_COMMANDS = createCommandCatalog([
     keywords: ["layout", "pane", "window", "布局", "窗口"],
     icon: "split",
     enabled: context => hasActiveTab(context) && context?.canSplit !== false,
+  },
+  {
+    id: "split-balance",
+    title: "Balance split panes (50/50)",
+    action: "split:set-preset",
+    payload: { ratio: 0.5 },
+    category: "View",
+    aliases: ["equal split", "balance panes", "reset split", "均分", "平分分屏", "重置分屏比例"],
+    keywords: ["ratio", "layout", "pane", "比例", "布局"],
+    icon: "split",
+    enabled: context => context?.inSplit === true,
+  },
+  {
+    id: "split-preset-70-30",
+    title: "Split panes 70/30",
+    action: "split:set-preset",
+    payload: { ratio: 0.7 },
+    category: "View",
+    aliases: ["focus first pane", "70 30", "七三分屏", "放大左侧"],
+    keywords: ["ratio", "layout", "pane", "比例", "布局"],
+    icon: "split",
+    enabled: context => context?.inSplit === true,
+  },
+  {
+    id: "split-preset-30-70",
+    title: "Split panes 30/70",
+    action: "split:set-preset",
+    payload: { ratio: 0.3 },
+    category: "View",
+    aliases: ["focus second pane", "30 70", "三七分屏", "放大右侧"],
+    keywords: ["ratio", "layout", "pane", "比例", "布局"],
+    icon: "split",
+    enabled: context => context?.inSplit === true,
+  },
+  {
+    id: "media-play-pause",
+    title: "Play or pause media",
+    action: "media:toggle-playback",
+    category: "Media",
+    aliases: ["pause media", "play media", "播放", "暂停", "播放暂停媒体"],
+    keywords: ["video", "audio", "music", "视频", "音频", "音乐"],
+    icon: "play",
+    enabled: hasActiveTab,
+  },
+  {
+    id: "media-picture-in-picture",
+    title: "Toggle Picture-in-Picture",
+    action: "media:toggle-pip",
+    category: "Media",
+    aliases: ["pip", "picture in picture", "画中画", "小窗播放", "悬浮窗口"],
+    keywords: ["video", "float", "overlay", "视频", "悬浮"],
+    icon: "expand",
+    enabled: hasActiveTab,
   },
   {
     id: "open-history",

@@ -2,6 +2,9 @@ const GENERATED_ID_ATTEMPTS = 100;
 
 export const LIBRARY_CONTAINER_LIMIT = 512;
 export const FOLDER_MEMBER_LIMIT = 512;
+export const BOOKMARK_FOLDER_LIMIT = 512;
+export const BOOKMARK_FOLDER_MEMBER_LIMIT = 512;
+export const BOOKMARK_FOLDER_DEPTH_LIMIT = 8;
 
 function asArray(value) {
   return Array.isArray(value) ? value : [];
@@ -267,6 +270,153 @@ export function repairLibraryTopology(
   return {
     folders: repairedFolders,
     splitGroups: repairedSplitGroups,
+    stats,
+  };
+}
+
+/**
+ * Repairs bookmark-folder membership invariants without mutating the input.
+ * Bookmark folders are global (not workspace-scoped) and flat (no nesting),
+ * so this is a smaller sibling of {@link repairLibraryTopology}: there are no
+ * split groups, no pinned/Essential exceptions, and no anchor-splicing.
+ *
+ * Folder and member order is stable. A bookmark claimed by more than one
+ * folder is kept only by the first surviving owner. An explicitly empty
+ * folder remains a durable, persisted entity.
+ *
+ * @param {{bookmarks?: unknown[], bookmarkFolders?: unknown[]}} topology
+ * @param {() => string} idFactory
+ * @returns {{bookmarkFolders: object[], stats: object}}
+ */
+export function repairBookmarkTopology(
+  { bookmarks, bookmarkFolders } = {},
+  idFactory
+) {
+  const sourceBookmarks = asArray(bookmarks);
+  const allBookmarkFolders = asArray(bookmarkFolders);
+  const sourceBookmarkFolders = allBookmarkFolders.slice(0, BOOKMARK_FOLDER_LIMIT);
+  const bookmarkIds = new Set(
+    sourceBookmarks.map(bookmark => referenceId(bookmark?.id)).filter(Boolean)
+  );
+  const reservedIds = new Set();
+  for (const folder of sourceBookmarkFolders) {
+    const id = normalizedId(folder?.id);
+    if (id) reservedIds.add(id);
+  }
+  const usedEntityIds = new Set();
+  const claimedBookmarks = new Set();
+  const repairedBookmarkFolders = [];
+  const stats = {
+    folderIdsRepaired: 0,
+    foldersRemoved: Math.max(
+      0,
+      allBookmarkFolders.length - sourceBookmarkFolders.length
+    ),
+    membershipsRemoved: 0,
+    parentsRepaired: 0,
+    totalRepairs: 0,
+  };
+
+  for (const folder of sourceBookmarkFolders) {
+    if (!folder || typeof folder !== "object") {
+      stats.foldersRemoved += 1;
+      continue;
+    }
+
+    const repairedId = repairEntityId(
+      folder,
+      idFactory,
+      usedEntityIds,
+      reservedIds,
+      "repaired-bookmark-folder"
+    );
+    if (repairedId.repaired) stats.folderIdsRepaired += 1;
+
+    const allBookmarkIds = asArray(folder.bookmarkIds);
+    const sourceBookmarkIds = allBookmarkIds.slice(0, BOOKMARK_FOLDER_MEMBER_LIMIT);
+    stats.membershipsRemoved += Math.max(
+      0,
+      allBookmarkIds.length - sourceBookmarkIds.length
+    );
+    const memberIds = [];
+    for (const bookmarkId of sourceBookmarkIds) {
+      if (!bookmarkIds.has(bookmarkId) || claimedBookmarks.has(bookmarkId)) {
+        stats.membershipsRemoved += 1;
+        continue;
+      }
+      claimedBookmarks.add(bookmarkId);
+      memberIds.push(bookmarkId);
+    }
+
+    repairedBookmarkFolders.push({
+      ...folder,
+      id: repairedId.id,
+      bookmarkIds: memberIds,
+    });
+  }
+
+  // Nesting repair: a parent reference must name another surviving folder,
+  // and following parents must terminate at the top level within the depth
+  // cap. Anything else (self-parenting, cycles, stale ids, excess depth)
+  // resets to top level rather than dropping the folder.
+  const survivingIds = new Set(repairedBookmarkFolders.map(folder => folder.id));
+  const parentOf = new Map();
+  for (const folder of repairedBookmarkFolders) {
+    const parentId = referenceId(folder.parentId);
+    parentOf.set(
+      folder.id,
+      parentId && parentId !== folder.id && survivingIds.has(parentId)
+        ? parentId
+        : ""
+    );
+  }
+  // Break cycles at a node inside the cycle so subtrees hanging off the
+  // cycle stay attached to their repaired ancestor.
+  for (const folder of repairedBookmarkFolders) {
+    const path = new Set([folder.id]);
+    let current = folder.id;
+    while (parentOf.get(current)) {
+      const parent = parentOf.get(current);
+      if (path.has(parent)) {
+        parentOf.set(parent, "");
+        break;
+      }
+      path.add(parent);
+      current = parent;
+    }
+  }
+  // Enforce the depth cap top-down: a folder that would sit at or beyond
+  // the cap becomes top-level (its own subtree keeps its relative shape).
+  const depthOf = new Map();
+  const resolveDepth = id => {
+    if (depthOf.has(id)) return depthOf.get(id);
+    const parent = parentOf.get(id);
+    const depth = parent ? resolveDepth(parent) + 1 : 0;
+    depthOf.set(id, depth);
+    return depth;
+  };
+  for (const folder of repairedBookmarkFolders) {
+    if (resolveDepth(folder.id) >= BOOKMARK_FOLDER_DEPTH_LIMIT) {
+      parentOf.set(folder.id, "");
+      depthOf.set(folder.id, 0);
+    }
+  }
+  for (const folder of repairedBookmarkFolders) {
+    const repairedParentId = parentOf.get(folder.id);
+    if (repairedParentId !== referenceId(folder.parentId)) {
+      stats.parentsRepaired += 1;
+    }
+    folder.parentId = repairedParentId;
+  }
+
+  stats.totalRepairs =
+    stats.folderIdsRepaired +
+    stats.foldersRemoved +
+    stats.membershipsRemoved +
+    stats.parentsRepaired;
+
+  return {
+    bookmarkFolders: repairedBookmarkFolders,
     stats,
   };
 }

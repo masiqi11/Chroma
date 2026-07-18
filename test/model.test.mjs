@@ -11,6 +11,8 @@ import {
   TAB_DATA_FAVICON_MAX_LENGTH,
   TAB_URL_MAX_LENGTH,
   createDefaultState,
+  normalizeContainerProxy,
+  normalizeContainerUserAgent,
   normalizeTabFavicon,
   normalizeTabUrl,
   sanitizeHistory,
@@ -625,7 +627,7 @@ test("enforces global container IDs and per-workspace ownership on hostile state
     { now: NOW }
   );
 
-  assert.equal(state.schemaVersion, 6);
+  assert.equal(state.schemaVersion, STATE_SCHEMA_VERSION);
   assertLibraryContainerInvariants(state);
   assert.equal(state.splitGroups.every(group => group.tabIds.length >= 2), true);
 });
@@ -731,7 +733,7 @@ test("repairs library containers again at the disk snapshot boundary", () => {
 
   const persisted = stateForDisk(liveState);
 
-  assert.equal(persisted.schemaVersion, 6);
+  assert.equal(persisted.schemaVersion, STATE_SCHEMA_VERSION);
   assertLibraryContainerInvariants(persisted);
   assert.deepEqual(liveState.folders, originalFolders);
   assert.deepEqual(liveState.splitGroups, originalSplitGroups);
@@ -1091,4 +1093,305 @@ test("persists bookmarks while repairing missing bookmark state", () => {
 
   const restored = sanitizeState({ ...firstRun, bookmarks: undefined }, ids());
   assert.deepEqual(restored.bookmarks, []);
+});
+
+test("migrates schema-6 profiles to an empty bookmark-folder list", () => {
+  const candidate = createDefaultState(ids());
+  candidate.schemaVersion = 6;
+  delete candidate.bookmarkFolders;
+
+  const state = sanitizeState(candidate, ids(), { now: NOW });
+
+  assert.equal(state.schemaVersion, STATE_SCHEMA_VERSION);
+  assert.deepEqual(state.bookmarkFolders, []);
+  assert.equal(Object.hasOwn(candidate, "bookmarkFolders"), false);
+});
+
+test("sanitizes bookmark folders and repairs stale or duplicate membership", () => {
+  const base = createDefaultState(ids());
+  base.bookmarks = [
+    { id: "b1", title: "One", url: "https://example.com/one", createdAt: 1 },
+    { id: "b2", title: "Two", url: "https://example.com/two", createdAt: 2 },
+    { id: "b3", title: "Three", url: "https://example.com/three", createdAt: 3 },
+  ];
+  base.bookmarkFolders = [
+    {
+      id: "folder-a",
+      name: "Folder A",
+      bookmarkIds: ["b1", "b2", "missing-bookmark"],
+      expanded: true,
+    },
+    {
+      id: "folder-a",
+      name: "Duplicate ID",
+      bookmarkIds: ["b2", "b3"],
+      expanded: false,
+    },
+  ];
+
+  const state = sanitizeState(base, ids());
+
+  assert.equal(state.bookmarkFolders.length, 2);
+  assert.equal(new Set(state.bookmarkFolders.map(folder => folder.id)).size, 2);
+  assert.deepEqual(state.bookmarkFolders[0].bookmarkIds, ["b1", "b2"]);
+  assert.deepEqual(state.bookmarkFolders[1].bookmarkIds, ["b3"]);
+});
+
+test("keeps an explicitly empty bookmark folder as a durable entity", () => {
+  const base = createDefaultState(ids());
+  base.bookmarks = [];
+  base.bookmarkFolders = [
+    { id: "folder-a", name: "Empty", bookmarkIds: [], expanded: true },
+  ];
+
+  const state = sanitizeState(base, ids());
+
+  assert.equal(state.bookmarkFolders.length, 1);
+  assert.deepEqual(state.bookmarkFolders[0].bookmarkIds, []);
+});
+
+test("persists bookmark folders while repairing missing bookmark-folder state", () => {
+  const firstRun = createDefaultState(ids());
+  firstRun.bookmarks.push({
+    id: "bookmark",
+    title: "Example",
+    url: "https://example.com/",
+    createdAt: 123,
+  });
+  firstRun.bookmarkFolders.push({
+    id: "folder",
+    name: "Folder",
+    parentId: "",
+    bookmarkIds: ["bookmark"],
+    expanded: true,
+  });
+  assert.deepEqual(stateForDisk(firstRun).bookmarkFolders, firstRun.bookmarkFolders);
+
+  const restored = sanitizeState({ ...firstRun, bookmarkFolders: undefined }, ids());
+  assert.deepEqual(restored.bookmarkFolders, []);
+});
+
+test("migrates schema-7 profiles to empty containers and default-container tabs", () => {
+  const candidate = createDefaultState(ids());
+  candidate.schemaVersion = 7;
+  delete candidate.containers;
+  for (const tab of candidate.tabs) delete tab.containerId;
+
+  const state = sanitizeState(candidate, ids(), { now: NOW });
+
+  assert.equal(state.schemaVersion, STATE_SCHEMA_VERSION);
+  assert.deepEqual(state.containers, []);
+  assert.equal(state.tabs.every(tab => tab.containerId === ""), true);
+});
+
+test("sanitizes containers to partition-safe IDs and valid tab references", () => {
+  const base = createDefaultState(ids());
+  base.containers = [
+    { id: "work-A_1", name: "  Work  ", color: "#AABBCC" },
+    { id: "bad id/../escape", name: "Escape", color: "not-a-color" },
+    { id: "work-A_1", name: "Duplicate", color: "#123456" },
+    { id: "orphan-target", name: "Orphan", color: "#654321" },
+  ];
+  base.tabs[0].containerId = "work-A_1";
+  base.tabs.push({
+    ...base.tabs[0],
+    id: "tab-orphan",
+    containerId: "missing-container",
+  });
+
+  const state = sanitizeState(base, ids());
+
+  assert.equal(state.containers.length, 4);
+  assert.equal(state.containers[0].id, "work-A_1");
+  assert.equal(state.containers[0].name, "Work");
+  assert.equal(state.containers[0].color, "#aabbcc");
+  assert.equal(/^[A-Za-z0-9_-]{1,64}$/.test(state.containers[1].id), true);
+  assert.notEqual(state.containers[1].id, "bad id/../escape");
+  assert.equal(state.containers[1].color, "#7cc4ff");
+  assert.notEqual(state.containers[2].id, "work-A_1");
+  assert.equal(new Set(state.containers.map(container => container.id)).size, 4);
+  assert.equal(state.tabs[0].containerId, "work-A_1");
+  assert.equal(
+    state.tabs.find(tab => tab.id === "tab-orphan").containerId,
+    "",
+    "a tab referencing a missing container must fall back to the default partition"
+  );
+});
+
+test("migrates schema-11 containers to a direct proxy policy", () => {
+  const candidate = createDefaultState(ids());
+  candidate.schemaVersion = 11;
+  candidate.containers = [{ id: "work-A_1", name: "Work", color: "#aabbcc" }];
+
+  const state = sanitizeState(candidate, ids(), { now: NOW });
+
+  assert.equal(state.schemaVersion, STATE_SCHEMA_VERSION);
+  assert.equal(state.containers[0].proxy, "");
+});
+
+test("migrates schema-12 containers to the default user agent", () => {
+  const candidate = createDefaultState(ids());
+  candidate.schemaVersion = 12;
+  candidate.containers = [
+    { id: "work-A_1", name: "Work", color: "#aabbcc", proxy: "http://p.example:80" },
+  ];
+
+  const state = sanitizeState(candidate, ids(), { now: NOW });
+
+  assert.equal(state.schemaVersion, STATE_SCHEMA_VERSION);
+  assert.equal(state.containers[0].userAgent, "");
+  assert.equal(state.containers[0].proxy, "http://p.example:80");
+});
+
+test("normalizeContainerUserAgent admits only bounded printable ASCII", () => {
+  assert.equal(
+    normalizeContainerUserAgent("  Mozilla/5.0 (X11; Linux x86_64) Custom/1.0  "),
+    "Mozilla/5.0 (X11; Linux x86_64) Custom/1.0"
+  );
+  assert.equal(normalizeContainerUserAgent("UA\r\nInjected: header"), "");
+  assert.equal(normalizeContainerUserAgent("UA\u0000null"), "");
+  assert.equal(normalizeContainerUserAgent("模拟浏览器/1.0"), "");
+  assert.equal(normalizeContainerUserAgent("a".repeat(513)), "");
+  assert.equal(normalizeContainerUserAgent("   "), "");
+  assert.equal(normalizeContainerUserAgent(42), "");
+});
+
+test("sanitizes container proxy rules to a single explicit endpoint", () => {
+  const base = createDefaultState(ids());
+  base.containers = [
+    { id: "keep-1", name: "Keep", color: "#aabbcc", proxy: " SOCKS5://127.0.0.1:1080 " },
+    { id: "keep-2", name: "Default port", color: "#aabbcc", proxy: "http://proxy.example" },
+    { id: "drop-1", name: "Bad scheme", color: "#aabbcc", proxy: "ftp://proxy.example:21" },
+    { id: "drop-2", name: "Credentials", color: "#aabbcc", proxy: "http://user:pw@proxy.example:8080" },
+  ];
+
+  const state = sanitizeState(base, ids());
+
+  assert.equal(state.containers[0].proxy, "socks5://127.0.0.1:1080");
+  assert.equal(state.containers[1].proxy, "http://proxy.example:80");
+  assert.equal(state.containers[2].proxy, "");
+  assert.equal(state.containers[3].proxy, "");
+});
+
+test("normalizeContainerProxy admits only known proxy schemes with usable ports", () => {
+  assert.equal(normalizeContainerProxy("socks5://[::1]:9050"), "socks5://[::1]:9050");
+  assert.equal(normalizeContainerProxy("HTTPS://Proxy.Example:8443"), "https://proxy.example:8443");
+  assert.equal(normalizeContainerProxy("socks4://relay.example:1080"), "socks4://relay.example:1080");
+  assert.equal(normalizeContainerProxy("https://proxy.example"), "https://proxy.example:443");
+  assert.equal(normalizeContainerProxy("socks5://relay.example"), "", "SOCKS has no default port");
+  assert.equal(normalizeContainerProxy("http://proxy.example:0"), "");
+  assert.equal(normalizeContainerProxy("http://proxy.example:70000"), "");
+  assert.equal(normalizeContainerProxy("http://proxy.example:8080/path"), "");
+  assert.equal(normalizeContainerProxy("http://proxy.example:8080?x=1"), "");
+  assert.equal(normalizeContainerProxy("javascript:alert(1)"), "");
+  assert.equal(normalizeContainerProxy("proxy.example:8080"), "", "a scheme is required");
+  assert.equal(normalizeContainerProxy(`http://${"a".repeat(300)}:80`), "");
+  assert.equal(normalizeContainerProxy(42), "");
+});
+
+test("migrates schema-8 profiles to an empty live-folder list", () => {
+  const candidate = createDefaultState(ids());
+  candidate.schemaVersion = 8;
+  delete candidate.liveFolders;
+
+  const state = sanitizeState(candidate, ids(), { now: NOW });
+
+  assert.equal(state.schemaVersion, STATE_SCHEMA_VERSION);
+  assert.deepEqual(state.liveFolders, []);
+  assert.equal(Object.hasOwn(candidate, "liveFolders"), false);
+});
+
+test("sanitizes live folders to safe sources and capped, deduplicated items", () => {
+  const base = createDefaultState(ids());
+  base.liveFolders = [
+    {
+      id: "live-a",
+      name: "  News  ",
+      sourceUrl: "https://feeds.example/news.xml",
+      expanded: false,
+      items: [
+        { url: "https://example.com/one", title: "  One  " },
+        { url: "https://example.com/one", title: "Duplicate" },
+        { url: "javascript:alert(1)", title: "Unsafe" },
+        { url: "https://example.com/two", title: "" },
+        { title: "No URL at all" },
+      ],
+      refreshedAt: NOW + 999_999,
+      status: "error",
+    },
+    { id: "live-b", name: "Dup source", sourceUrl: "https://feeds.example/news.xml" },
+    { id: "live-c", name: "Bad source", sourceUrl: "file:///etc/passwd" },
+    { id: "live-a", name: "Dup ID", sourceUrl: "https://feeds.example/other.xml" },
+  ];
+
+  const state = sanitizeState(base, ids(), { now: NOW });
+
+  assert.equal(state.liveFolders.length, 2);
+  const [first, second] = state.liveFolders;
+  assert.equal(first.id, "live-a");
+  assert.equal(first.name, "News");
+  assert.equal(first.expanded, false);
+  assert.equal(first.status, "error");
+  assert.equal(first.refreshedAt, NOW, "future refresh stamps clamp to now");
+  assert.deepEqual(first.items, [
+    { url: "https://example.com/one", title: "One" },
+    { url: "https://example.com/two", title: "https://example.com/two" },
+  ]);
+  assert.notEqual(second.id, "live-a");
+  assert.equal(second.sourceUrl, "https://feeds.example/other.xml");
+  assert.equal(second.status, "ok");
+  assert.equal(second.refreshedAt, 0);
+});
+
+test("migrates schema-10 essentials to an empty saved-page field", () => {
+  const candidate = createDefaultState(ids());
+  candidate.schemaVersion = 10;
+  candidate.tabs[0].essential = true;
+  candidate.tabs[0].pinned = true;
+  delete candidate.tabs[0].essentialUrl;
+
+  const state = sanitizeState(candidate, ids(), { now: NOW });
+
+  assert.equal(state.schemaVersion, STATE_SCHEMA_VERSION);
+  assert.equal(state.tabs[0].essentialUrl, "");
+});
+
+test("migrates schema-9 bookmark folders to top-level parents", () => {
+  const candidate = createDefaultState(ids());
+  candidate.schemaVersion = 9;
+  candidate.bookmarks.push({
+    id: "bm",
+    title: "Example",
+    url: "https://example.com/",
+    createdAt: 1,
+  });
+  candidate.bookmarkFolders.push({
+    id: "legacy-folder",
+    name: "Legacy",
+    bookmarkIds: ["bm"],
+    expanded: true,
+  });
+  delete candidate.bookmarkFolders[0].parentId;
+
+  const state = sanitizeState(candidate, ids(), { now: NOW });
+
+  assert.equal(state.schemaVersion, STATE_SCHEMA_VERSION);
+  assert.equal(state.bookmarkFolders[0].parentId, "");
+});
+
+test("persists live folders across disk round-trips", () => {
+  const firstRun = createDefaultState(ids());
+  firstRun.liveFolders.push({
+    id: "live-folder",
+    name: "Reader",
+    sourceUrl: "https://feeds.example/reader.xml",
+    expanded: true,
+    items: [{ url: "https://example.com/article", title: "Article" }],
+    refreshedAt: 123,
+    status: "ok",
+  });
+  assert.deepEqual(stateForDisk(firstRun).liveFolders, firstRun.liveFolders);
+
+  const restored = sanitizeState({ ...firstRun, liveFolders: undefined }, ids());
+  assert.deepEqual(restored.liveFolders, []);
 });

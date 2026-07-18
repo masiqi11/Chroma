@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { readFile, stat, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
 import {
@@ -6,6 +7,8 @@ import {
   WebContentsView,
   clipboard,
   dialog,
+  globalShortcut,
+  session,
   shell,
   screen,
   webContents,
@@ -14,6 +17,9 @@ import {
 import { channels, commands } from "../shared/channels.mjs";
 import { APPEARANCE_THEMES } from "../shared/appearance.mjs";
 import {
+  MAX_SPLIT_RATIO,
+  MIN_SPLIT_RATIO,
+  applySplitRatioPreset,
   createSplitLayout,
   insertSplitPane,
   removeSplitPane,
@@ -37,20 +43,43 @@ import {
 } from "../shared/page-zoom.mjs";
 import { shortcutActionForInput } from "../shared/shortcut-registry.mjs";
 import {
+  BOOKMARK_IMPORT_MAX_BYTES,
+  parseBookmarksHtml,
+  serializeBookmarks,
+} from "../shared/bookmark-io.mjs";
+import {
+  CONTAINER_LIMIT,
+  LIVE_FOLDER_ITEM_LIMIT,
+  LIVE_FOLDER_LIMIT,
   TAB_COUNT_LIMIT,
   TAB_URL_MAX_LENGTH,
+  isPartitionSafeContainerId,
+  normalizeLiveFolderSourceUrl,
   normalizeTabFavicon,
+  normalizeContainerProxy,
+  normalizeContainerUserAgent,
   normalizeWorkspaceColor,
 } from "../shared/model.mjs";
 import {
+  BOOKMARK_FOLDER_DEPTH_LIMIT,
+  BOOKMARK_FOLDER_LIMIT,
+  BOOKMARK_FOLDER_MEMBER_LIMIT,
   FOLDER_MEMBER_LIMIT,
   LIBRARY_CONTAINER_LIMIT,
 } from "../shared/state-invariants.mjs";
 import { createDownloadService } from "./download-service.mjs";
+import { createExtensionService } from "./extension-service.mjs";
+import { fetchFeed } from "./feed-service.mjs";
 import { createHistoryService } from "./history-service.mjs";
 import { installInternalProtocol } from "./internal-pages.mjs";
 
 const MAX_CLOSED_TABS = 25;
+// Live folders only re-fetch a feed after this long, no matter how the
+// refresh was triggered from the shell, so a hostile page cannot turn the
+// browser into a request loop against the feed host.
+const LIVE_FOLDER_MANUAL_REFRESH_MS = 30 * 1_000;
+const LIVE_FOLDER_STALE_MS = 15 * 60 * 1_000;
+const LIVE_FOLDER_SWEEP_MS = 5 * 60 * 1_000;
 const SIDEBAR_OVERLAY_INSET = 5;
 const SIDEBAR_OVERLAY_SHADOW_SPACE = 10;
 const SIDEBAR_OVERLAY_ANIMATION_MS = 170;
@@ -108,6 +137,21 @@ function normalizedMediaTypes(details) {
 function mediaPermissionLabel(types) {
   if (types.length === 2) return "the microphone and camera";
   return types[0] === "audio" ? "the microphone" : "the camera";
+}
+
+// Artwork reaches the shell as an <img> source, so only http(s) URLs and
+// bounded raster data URIs are allowed through.
+function safeArtworkUrl(value) {
+  if (typeof value !== "string" || !value || value.length > 262_144) return "";
+  if (/^data:image\/(png|jpeg|gif|webp);base64,/i.test(value)) return value;
+  try {
+    const url = new URL(value);
+    return ["http:", "https:"].includes(url.protocol) && value.length <= 2_048
+      ? url.href
+      : "";
+  } catch {
+    return "";
+  }
 }
 
 function safeErrorCode(error) {
@@ -200,6 +244,17 @@ export class BrowserController {
   #historyNextTransitions = new Map();
   #historyService;
   #downloadService;
+  #extensionService = null;
+  #extensionRegistryFile = null;
+  #liveFolderFetch = null;
+  #liveFolderRefreshes = new Set();
+  #liveFolderSweepTimer = null;
+  #glance = null;
+  #extensionPopup = null;
+  #mediaTabs = new Set();
+  #mediaKeyRegistered = false;
+  #pendingAuthRequests = [];
+  #uaOverrides = new Map();
   #adaptiveViews = new Map();
   #desktopUserAgent = "";
   #mobileUserAgent = mobileUserAgent();
@@ -238,8 +293,12 @@ export class BrowserController {
       registerShellWebContents = () => {},
       unregisterShellWebContents = () => {},
       applyAppearance = () => {},
+      extensionRegistryFile = null,
+      liveFolderFetch = null,
     } = {}
   ) {
+    this.#extensionRegistryFile = extensionRegistryFile;
+    this.#liveFolderFetch = liveFolderFetch;
     this.#window = browserWindow;
     this.#state = state;
     this.#store = stateStore;
@@ -273,6 +332,47 @@ export class BrowserController {
     this.#wireShellShortcuts(this.#window.webContents);
     const { prunedCount } = this.#historyService.prune();
     if (prunedCount) this.#store.scheduleSave(this.#state);
+    if (this.#extensionRegistryFile) {
+      try {
+        this.#extensionService = createExtensionService({
+          browserSession: session.fromPartition("persist:chroma-main"),
+          registryFile: this.#extensionRegistryFile,
+          onChange: () => {
+            if (!this.#destroying) this.#notify(false);
+          },
+        });
+        const { failures } = await this.#extensionService.loadInstalled();
+        for (const failure of failures) {
+          console.warn(
+            `Unable to restore extension at ${failure.path}: ${failure.message}`
+          );
+        }
+      } catch (error) {
+        this.#extensionService = null;
+        console.warn(`Unable to start the extension service: ${error?.message}`);
+      }
+    }
+    try {
+      // Media-key registration can be refused by the OS (e.g. macOS without
+      // accessibility trust); the browser works identically without it.
+      this.#mediaKeyRegistered = globalShortcut.register("MediaPlayPause", () => {
+        if (this.#destroying || !this.#acceptCommands) return;
+        this.#runDetached(
+          this.playPauseMostRecentMedia(),
+          "Unable to handle the media key"
+        );
+      }) === true;
+    } catch {
+      this.#mediaKeyRegistered = false;
+    }
+    for (const container of this.#state.containers) {
+      if (container.proxy) await this.#applyContainerProxy(container);
+    }
+    this.#liveFolderSweepTimer = setInterval(() => {
+      this.#refreshStaleLiveFolders();
+    }, LIVE_FOLDER_SWEEP_MS);
+    this.#liveFolderSweepTimer.unref?.();
+    this.#refreshStaleLiveFolders();
     for (const tab of this.#state.tabs) {
       if (!this.#views.has(tab.id)) this.#createView(tab);
     }
@@ -289,6 +389,25 @@ export class BrowserController {
     const publicState = structuredClone(stateWithoutHistory);
     return {
       ...publicState,
+      glance: this.#glance
+        ? { open: true, url: this.#glance.url, sourceTabId: this.#glance.sourceTabId }
+        : { open: false },
+      extensionPopup: this.#extensionPopup
+        ? { open: true, extensionId: this.#extensionPopup.extensionId }
+        : { open: false },
+      mediaTabIds: [...this.#mediaTabs].filter(id =>
+        this.#state.tabs.some(tab => tab.id === id)
+      ),
+      uaOverrides: Object.fromEntries(this.#uaOverrides),
+      pendingAuth: this.#pendingAuthRequests.length
+        ? {
+            id: this.#pendingAuthRequests[0].id,
+            host: this.#pendingAuthRequests[0].host,
+            realm: this.#pendingAuthRequests[0].realm,
+            isProxy: this.#pendingAuthRequests[0].isProxy,
+          }
+        : null,
+      extensions: this.#extensionService?.snapshot() || [],
       downloads: this.#downloadService.snapshot(),
       historyRevision: history?.revision ?? 0,
       historyCount: history?.entries?.length ?? 0,
@@ -449,6 +568,8 @@ export class BrowserController {
         return this.closeTab(payload.id);
       case commands.recoverTab:
         return this.recoverTab(payload.id);
+      case commands.discardTab:
+        return this.discardTab(payload.id);
       case commands.reopenTab:
         return this.reopenClosedTab();
       case commands.reorderTab:
@@ -476,16 +597,54 @@ export class BrowserController {
         return this.reloadIgnoringCache(payload.id);
       case commands.stop:
         return this.stop(payload.id);
+      case commands.toggleMediaPlayback:
+        return this.toggleMediaPlayback(payload.id);
+      case commands.queryNowPlaying:
+        return this.queryNowPlaying();
+      case commands.togglePictureInPicture:
+        return this.togglePictureInPicture(payload.id);
       case commands.toggleMute:
         return this.toggleMute(payload.id);
       case commands.togglePin:
         return this.togglePin(payload.id);
       case commands.toggleEssential:
         return this.toggleEssential(payload.id);
+      case commands.resetEssential:
+        return this.resetEssential(payload.id);
+      case commands.setTabUserAgentMode:
+        return this.setTabUserAgentMode(payload.id, payload.mode);
       case commands.toggleBookmark:
         return this.toggleBookmark(payload.id);
       case commands.removeBookmark:
         return this.removeBookmark(payload.id);
+      case commands.renameBookmark:
+        return this.renameBookmark(payload.id, payload.title);
+      case commands.moveBookmark:
+        return this.moveBookmark(payload);
+      case commands.importBookmarks:
+        return this.importBookmarks(payload);
+      case commands.exportBookmarks:
+        return this.exportBookmarks(payload);
+      case commands.createBookmarkFolder:
+        return this.createBookmarkFolder(payload);
+      case commands.toggleBookmarkFolder:
+        return this.toggleBookmarkFolder(payload.id);
+      case commands.renameBookmarkFolder:
+        return this.renameBookmarkFolder(payload.id, payload.name);
+      case commands.deleteBookmarkFolder:
+        return this.deleteBookmarkFolder(payload.id);
+      case commands.moveBookmarkFolder:
+        return this.moveBookmarkFolder(payload);
+      case commands.createLiveFolder:
+        return this.createLiveFolder(payload);
+      case commands.toggleLiveFolder:
+        return this.toggleLiveFolder(payload.id);
+      case commands.renameLiveFolder:
+        return this.renameLiveFolder(payload.id, payload.name);
+      case commands.deleteLiveFolder:
+        return this.deleteLiveFolder(payload.id);
+      case commands.refreshLiveFolder:
+        return this.refreshLiveFolder(payload.id);
       case commands.queryHistory:
         return this.queryHistory(payload);
       case commands.suggestHistory:
@@ -551,6 +710,8 @@ export class BrowserController {
         return this.unsplitActive();
       case commands.setSplitRatio:
         return this.commitSplitRatio(payload);
+      case commands.setSplitPreset:
+        return this.setSplitPreset(payload);
       case commands.createFolder:
         return this.createFolder(payload);
       case commands.toggleFolder:
@@ -559,6 +720,42 @@ export class BrowserController {
         return this.renameFolder(payload.id, payload.name);
       case commands.deleteFolder:
         return this.deleteFolder(payload.id);
+      case commands.createContainer:
+        return this.createContainer(payload);
+      case commands.renameContainer:
+        return this.renameContainer(payload.id, payload.name);
+      case commands.deleteContainer:
+        return this.deleteContainer(payload.id);
+      case commands.setContainerColor:
+        return this.setContainerColor(payload.id, payload.color);
+      case commands.setContainerProxy:
+        return this.setContainerProxy(payload.id, payload.proxy);
+      case commands.setContainerUserAgent:
+        return this.setContainerUserAgent(payload.id, payload.userAgent);
+      case commands.reopenTabInContainer:
+        return this.reopenTabInContainer(payload.id, payload.containerId);
+      case commands.clearSiteData:
+        return this.clearSiteData(payload.id);
+      case commands.submitAuthCredentials:
+        return this.submitAuthCredentials(payload);
+      case commands.cancelAuthRequest:
+        return this.cancelAuthRequest(payload);
+      case commands.openGlance:
+        return this.openGlance(payload.url, payload.sourceTabId);
+      case commands.closeGlance:
+        return this.closeGlance();
+      case commands.promoteGlance:
+        return this.promoteGlance();
+      case commands.openExtensionPopup:
+        return this.openExtensionPopup(payload.id);
+      case commands.closeExtensionPopup:
+        return this.closeExtensionPopup();
+      case commands.installExtension:
+        return this.installExtension(payload.path);
+      case commands.removeExtension:
+        return this.removeExtension(payload.id);
+      case commands.reloadExtension:
+        return this.reloadExtension(payload.id);
       case commands.toggleSidebar:
         return this.toggleSidebar();
       case commands.setSidebarWidth:
@@ -734,22 +931,49 @@ export class BrowserController {
     return true;
   }
 
+  setSplitPreset({ ratio } = {}) {
+    const group = this.#splitForTab(this.#state.activeTabId);
+    if (
+      !group ||
+      typeof ratio !== "number" ||
+      !Number.isFinite(ratio) ||
+      ratio < MIN_SPLIT_RATIO ||
+      ratio > MAX_SPLIT_RATIO
+    ) {
+      return false;
+    }
+    const layout = this.#normalizedGroupLayout(group);
+    if (!layout || layout.type !== "split") return false;
+    this.#splitLayoutPreviews.delete(group.id);
+    this.#applyGroupLayout(group, applySplitRatioPreset(layout, ratio));
+    this.#commit();
+    return true;
+  }
+
   #createTabRecord({
     url = "chroma://newtab/",
     workspaceId = this.#state.activeWorkspaceId,
+    containerId = "",
     essential = false,
     pinned = false,
   } = {}) {
     const workspace = this.#workspace(workspaceId) || this.#activeWorkspace();
     const normalizedUrl = normalizeRequestedPageUrl(url);
     const isEssential = Boolean(essential);
+    const requestedContainerId = typeof containerId === "string" ? containerId : "";
     return {
       id: randomUUID(),
       workspaceId: workspace.id,
+      containerId:
+        this.#state.containers?.some(container => container.id === requestedContainerId)
+          ? requestedContainerId
+          : "",
       url: normalizedUrl,
       title: normalizedUrl.startsWith("chroma://newtab") ? "New Tab" : "Loading…",
       favicon: "",
       essential: isEssential,
+      essentialUrl:
+        isEssential && /^https?:\/\//i.test(normalizedUrl) ? normalizedUrl : "",
       pinned: isEssential || Boolean(pinned),
       muted: false,
       audible: false,
@@ -764,6 +988,7 @@ export class BrowserController {
   async createTab({
     url = "chroma://newtab/",
     workspaceId = this.#state.activeWorkspaceId,
+    containerId = "",
     activate = true,
     essential = false,
     pinned = false,
@@ -772,6 +997,7 @@ export class BrowserController {
     const tab = this.#createTabRecord({
       url,
       workspaceId,
+      containerId,
       essential,
       pinned,
     });
@@ -790,6 +1016,7 @@ export class BrowserController {
   selectTab(id) {
     const tab = this.#tab(id);
     if (!tab) return false;
+    this.#restoreDiscardedTab(tab);
     this.#state.activeWorkspaceId = tab.workspaceId;
     this.#state.activeTabId = tab.id;
     tab.lastActiveAt = Date.now();
@@ -910,6 +1137,34 @@ export class BrowserController {
     this.#commit();
     this.#focusTab(id);
     return true;
+  }
+
+  async discardTab(id) {
+    if (!validId(id)) return false;
+    const tab = this.#tab(id);
+    if (
+      !tab ||
+      tab.discarded ||
+      tab.crashed ||
+      tab.id === this.#state.activeTabId ||
+      this.#splitForTab(tab.id)
+    ) {
+      return false;
+    }
+    const destroyed = await this.#destroyView(tab.id);
+    if (!destroyed || this.#destroying || this.#tab(id) !== tab) return false;
+    tab.discarded = true;
+    tab.loading = false;
+    tab.audible = false;
+    tab.crashed = false;
+    this.#commit();
+    return true;
+  }
+
+  #restoreDiscardedTab(tab) {
+    if (!tab?.discarded) return;
+    tab.discarded = false;
+    if (!this.#views.has(tab.id)) this.#createView(tab);
   }
 
   // `folderId` is intentionally tri-state: omitted preserves legacy inference
@@ -1138,6 +1393,211 @@ export class BrowserController {
     }
   }
 
+  /**
+   * Reads now-playing information from every tab that has produced media:
+   * the page's MediaSession metadata when it exists, plus whether anything
+   * is currently playing. Tabs whose media never started, or whose script
+   * fails, are skipped. Results are bounded and shaped in the host, so the
+   * shell never renders raw page values beyond capped strings.
+   */
+  async queryNowPlaying() {
+    const candidateIds = [...this.#mediaTabs].filter(id => this.#tab(id));
+    const entries = [];
+    for (const id of candidateIds) {
+      const tab = this.#tab(id);
+      if (tab.discarded || tab.crashed) continue;
+      const contents = this.#safeViewContents(this.#viewFor(id));
+      if (!contents) continue;
+      try {
+        const result = await contents.executeJavaScript(`(() => {
+          const media = [...document.querySelectorAll("video, audio")];
+          if (!media.length) return null;
+          const playing = media.some(item => !item.paused && !item.ended);
+          const metadata = navigator.mediaSession?.metadata;
+          const artwork = Array.isArray(metadata?.artwork)
+            ? [...metadata.artwork]
+                .map(item => ({
+                  src: typeof item?.src === "string" ? item.src : "",
+                  area: (() => {
+                    const match = /^(\\d+)x(\\d+)$/.exec(item?.sizes || "");
+                    return match ? Number(match[1]) * Number(match[2]) : 0;
+                  })(),
+                }))
+                .filter(item => item.src)
+                .sort((left, right) => right.area - left.area)[0]?.src || ""
+            : "";
+          return {
+            title: typeof metadata?.title === "string" ? metadata.title : "",
+            artist: typeof metadata?.artist === "string" ? metadata.artist : "",
+            artwork,
+            playing,
+          };
+        })()`);
+        if (!result || typeof result !== "object") continue;
+        entries.push({
+          tabId: id,
+          title: String(result.title || "").slice(0, 300) || tab.title,
+          artist: String(result.artist || "").slice(0, 300),
+          artworkUrl: safeArtworkUrl(result.artwork),
+          playing: result.playing === true,
+        });
+      } catch {
+        // A navigated or torn-down page simply drops out of the list.
+      }
+    }
+    return entries;
+  }
+
+  /**
+   * Clears the active origin's stored site data (cookies, storage, caches)
+   * inside the tab's own partition, then reloads the page. Only web pages
+   * qualify — internal pages have no site data to clear.
+   */
+  async clearSiteData(id = this.#state.activeTabId) {
+    const tab = this.#tab(id);
+    if (!tab) return false;
+    const origin = this.#webOrigin(tab.url);
+    if (!origin) return false;
+    try {
+      const ses = session.fromPartition(this.#partitionForTab(tab));
+      await ses.clearStorageData({ origin });
+      this.reload(tab.id);
+      return true;
+    } catch (error) {
+      console.warn(`Unable to clear site data [${safeErrorCode(error)}]`);
+      return false;
+    }
+  }
+
+  /**
+   * Accepts an HTTP Basic/Proxy authentication challenge from Electron's
+   * `app.on("login")` and surfaces it as a queued shell prompt. Credentials
+   * pass straight through to Chromium's network stack and are never
+   * persisted by Chroma. Returns false (letting the caller cancel the
+   * challenge) when the controller is shutting down.
+   */
+  handleAuthRequest(authInfo, callback) {
+    if (this.#destroying || typeof callback !== "function") return false;
+    this.#pendingAuthRequests.push({
+      id: randomUUID(),
+      callback,
+      host: String(authInfo?.host || "").slice(0, 300),
+      realm: String(authInfo?.realm || "").slice(0, 300),
+      isProxy: authInfo?.isProxy === true,
+    });
+    this.#notify(false);
+    return true;
+  }
+
+  submitAuthCredentials({ id, username, password } = {}) {
+    if (
+      !validId(id) ||
+      typeof username !== "string" ||
+      typeof password !== "string" ||
+      username.length > 500 ||
+      password.length > 500
+    ) {
+      return false;
+    }
+    const index = this.#pendingAuthRequests.findIndex(entry => entry.id === id);
+    if (index < 0) return false;
+    const [entry] = this.#pendingAuthRequests.splice(index, 1);
+    try {
+      entry.callback(username, password);
+    } catch (error) {
+      console.warn(`Unable to submit credentials [${safeErrorCode(error)}]`);
+    }
+    this.#notify(false);
+    return true;
+  }
+
+  cancelAuthRequest({ id } = {}) {
+    const index = this.#pendingAuthRequests.findIndex(entry => entry.id === id);
+    if (index < 0) return false;
+    const [entry] = this.#pendingAuthRequests.splice(index, 1);
+    try {
+      entry.callback();
+    } catch (error) {
+      console.warn(`Unable to cancel the sign-in prompt [${safeErrorCode(error)}]`);
+    }
+    this.#notify(false);
+    return true;
+  }
+
+  /**
+   * Hardware media-key handler: toggles playback on the most recently
+   * playing media tab, preferring one that is currently audible. Returns
+   * the toggle outcome, or null when no media tab is available.
+   */
+  async playPauseMostRecentMedia() {
+    const candidates = [...this.#mediaTabs].reverse().filter(id => {
+      const tab = this.#tab(id);
+      return tab && !tab.discarded && !tab.crashed;
+    });
+    if (!candidates.length) return null;
+    const audibleId = candidates.find(id => this.#tab(id)?.audible);
+    return this.toggleMediaPlayback(audibleId ?? candidates[0]);
+  }
+
+  /**
+   * Toggles page media playback: pauses everything that is playing, or
+   * resumes the most usable media element when everything is paused. The
+   * script runs with a user gesture so autoplay policy cannot block the
+   * explicit user action. Returns "paused"/"playing", or null when the page
+   * has no media or refuses playback.
+   */
+  async toggleMediaPlayback(id = this.#state.activeTabId) {
+    const tab = this.#tab(id);
+    const contents = this.#safeViewContents(this.#viewFor(id));
+    if (!tab || !contents || tab.discarded || tab.crashed) return null;
+    try {
+      const result = await contents.executeJavaScript(`(() => {
+        const media = [...document.querySelectorAll("video, audio")];
+        if (!media.length) return null;
+        const playing = media.filter(item => !item.paused && !item.ended);
+        if (playing.length) {
+          for (const item of playing) item.pause();
+          return "paused";
+        }
+        const target = media.find(item => item.readyState > 0) || media[0];
+        return Promise.resolve(target.play()).then(() => "playing").catch(() => null);
+      })()`, true);
+      return result === "paused" || result === "playing" ? result : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Enters Picture-in-Picture on the largest eligible video, or exits an
+   * active PiP session. Returns "entered"/"exited", or null when the page
+   * has no eligible video or the platform denies the request.
+   */
+  async togglePictureInPicture(id = this.#state.activeTabId) {
+    const tab = this.#tab(id);
+    const contents = this.#safeViewContents(this.#viewFor(id));
+    if (!tab || !contents || tab.discarded || tab.crashed) return null;
+    try {
+      const result = await contents.executeJavaScript(`(() => {
+        if (document.pictureInPictureElement) {
+          return document.exitPictureInPicture().then(() => "exited").catch(() => null);
+        }
+        if (!document.pictureInPictureEnabled) return null;
+        const target = [...document.querySelectorAll("video")]
+          .filter(video => video.readyState > 0 && !video.disablePictureInPicture)
+          .sort((left, right) =>
+            right.clientWidth * right.clientHeight -
+            left.clientWidth * left.clientHeight
+          )[0];
+        if (!target) return null;
+        return target.requestPictureInPicture().then(() => "entered").catch(() => null);
+      })()`, true);
+      return result === "entered" || result === "exited" ? result : null;
+    } catch {
+      return null;
+    }
+  }
+
   toggleMute(id = this.#state.activeTabId) {
     const tab = this.#tab(id);
     const contents = this.#safeViewContents(this.#viewFor(id));
@@ -1176,9 +1636,63 @@ export class BrowserController {
       if (view) this.#restoreDesktopLayout(tab.id, view);
     }
     tab.essential = essential;
+    // An Essential remembers the page it was promoted on so "reset" can
+    // return there after the user browses away.
+    tab.essentialUrl =
+      essential && /^https?:\/\//i.test(tab.url) ? new URL(tab.url).href : "";
     if (essential) tab.pinned = true;
     this.#commit();
     return essential;
+  }
+
+  /**
+   * Sets a per-tab user-agent override: "mobile" or "desktop" pin the UA and
+   * suspend the automatic narrow-pane adaptation for that tab; "auto"
+   * removes the pin and hands control back. Every change reloads the page
+   * so the site renders consistently for the new identity.
+   */
+  setTabUserAgentMode(id, mode) {
+    if (!validId(id) || !["mobile", "desktop", "auto"].includes(mode)) {
+      return false;
+    }
+    const tab = this.#tab(id);
+    const view = this.#viewFor(id);
+    const contents = this.#safeViewContents(view);
+    if (!tab || !contents || tab.discarded || tab.crashed) return false;
+    try {
+      if (mode === "auto") {
+        if (!this.#uaOverrides.has(id)) return true;
+        this.#uaOverrides.delete(id);
+        contents.setUserAgent(
+          this.#defaultUserAgentForTab(tab) || contents.session.getUserAgent()
+        );
+      } else {
+        if (this.#uaOverrides.get(id) === mode) return true;
+        this.#cancelAdaptiveProbe(id, true);
+        this.#uaOverrides.set(id, mode);
+        contents.setUserAgent(
+          mode === "mobile" ? this.#mobileUserAgent : this.#desktopUserAgent
+        );
+      }
+      contents.reloadIgnoringCache();
+      this.#notify(false);
+      return true;
+    } catch {
+      this.#uaOverrides.delete(id);
+      return false;
+    }
+  }
+
+  /**
+   * Returns an Essential to its saved page. Discarded Essentials get their
+   * view back first, so reset always ends on a live page.
+   */
+  resetEssential(id) {
+    if (!validId(id)) return false;
+    const tab = this.#tab(id);
+    if (!tab?.essential || !tab.essentialUrl) return false;
+    this.#restoreDiscardedTab(tab);
+    return this.navigate(tab.id, tab.essentialUrl);
   }
 
   toggleBookmark(id = this.#state.activeTabId) {
@@ -1190,7 +1704,8 @@ export class BrowserController {
       : (this.#state.bookmarks = []);
     const existingIndex = bookmarks.findIndex(bookmark => bookmark.url === url);
     if (existingIndex >= 0) {
-      bookmarks.splice(existingIndex, 1);
+      const [removed] = bookmarks.splice(existingIndex, 1);
+      this.#removeBookmarkFromFolders(removed.id);
       this.#commit();
       return false;
     }
@@ -1209,8 +1724,416 @@ export class BrowserController {
     const index = this.#state.bookmarks.findIndex(bookmark => bookmark.id === id);
     if (index < 0) return false;
     this.#state.bookmarks.splice(index, 1);
+    this.#removeBookmarkFromFolders(id);
     this.#commit();
     return true;
+  }
+
+  renameBookmark(id, title) {
+    if (!validId(id) || typeof title !== "string") return false;
+    const bookmark = (this.#state.bookmarks || []).find(item => item.id === id);
+    const value = title.trim().slice(0, 500);
+    if (!bookmark || !value) return false;
+    if (bookmark.title === value) return true;
+    bookmark.title = value;
+    this.#commit();
+    return true;
+  }
+
+  moveBookmark({ id, folderId } = {}) {
+    if (!validId(id)) return false;
+    const bookmark = this.#state.bookmarks.find(item => item.id === id);
+    if (!bookmark) return false;
+    if (folderId !== null && !validId(folderId)) return false;
+    let targetFolder = null;
+    if (folderId !== null) {
+      targetFolder = this.#state.bookmarkFolders.find(item => item.id === folderId);
+      if (!targetFolder) return false;
+      if (
+        !targetFolder.bookmarkIds.includes(id) &&
+        targetFolder.bookmarkIds.length >= BOOKMARK_FOLDER_MEMBER_LIMIT
+      ) {
+        return false;
+      }
+    }
+    this.#removeBookmarkFromFolders(id);
+    if (targetFolder) targetFolder.bookmarkIds.push(id);
+    this.#commit();
+    return true;
+  }
+
+  async exportBookmarks({ path: requestedPath } = {}) {
+    if (this.#destroying) return null;
+    let target = typeof requestedPath === "string" && requestedPath.trim()
+      ? requestedPath
+      : null;
+    if (!target) {
+      const picked = await dialog.showSaveDialog(this.#window, {
+        title: "Export bookmarks",
+        defaultPath: "chroma-bookmarks.html",
+        filters: [{ name: "Bookmark HTML", extensions: ["html"] }],
+      });
+      if (picked.canceled || !picked.filePath) return null;
+      target = picked.filePath;
+    }
+    try {
+      await writeFile(target, serializeBookmarks(this.#state), "utf8");
+      return { exported: this.#state.bookmarks.length, path: target };
+    } catch (error) {
+      console.warn(`Unable to export bookmarks: ${error?.message}`);
+      return null;
+    }
+  }
+
+  async importBookmarks({ path: requestedPath } = {}) {
+    if (this.#destroying) return null;
+    let source = typeof requestedPath === "string" && requestedPath.trim()
+      ? requestedPath
+      : null;
+    if (!source) {
+      const picked = await dialog.showOpenDialog(this.#window, {
+        title: "Import bookmarks",
+        properties: ["openFile"],
+        filters: [{ name: "Bookmark HTML", extensions: ["html", "htm"] }],
+      });
+      if (picked.canceled || !picked.filePaths?.length) return null;
+      source = picked.filePaths[0];
+    }
+    try {
+      const info = await stat(source);
+      if (info.size > BOOKMARK_IMPORT_MAX_BYTES) {
+        console.warn("Unable to import bookmarks: the file is too large");
+        return null;
+      }
+      const { items } = parseBookmarksHtml(await readFile(source, "utf8"));
+      const knownUrls = new Set(this.#state.bookmarks.map(item => item.url));
+      const folderKey = (name, parentId) => `${parentId} ${name}`;
+      const foldersByKey = new Map(
+        this.#state.bookmarkFolders.map(folder => [
+          folderKey(folder.name, folder.parentId || ""),
+          folder,
+        ])
+      );
+      const ensureFolderChain = folderPath => {
+        let parentId = "";
+        let folder = null;
+        const boundedPath = folderPath.slice(0, BOOKMARK_FOLDER_DEPTH_LIMIT);
+        for (const rawName of boundedPath) {
+          const name = rawName.slice(0, 80);
+          const existing = foldersByKey.get(folderKey(name, parentId));
+          if (existing) {
+            folder = existing;
+          } else {
+            if (this.#state.bookmarkFolders.length >= BOOKMARK_FOLDER_LIMIT) {
+              return folder;
+            }
+            folder = {
+              id: randomUUID(),
+              name,
+              parentId,
+              bookmarkIds: [],
+              expanded: true,
+            };
+            this.#state.bookmarkFolders.push(folder);
+            foldersByKey.set(folderKey(name, parentId), folder);
+          }
+          parentId = folder.id;
+        }
+        return folder;
+      };
+      let imported = 0;
+      let skipped = 0;
+      for (const item of items) {
+        if (knownUrls.has(item.url)) {
+          skipped += 1;
+          continue;
+        }
+        const bookmark = {
+          id: randomUUID(),
+          title: item.title,
+          url: item.url,
+          createdAt: Date.now(),
+        };
+        this.#state.bookmarks.push(bookmark);
+        knownUrls.add(item.url);
+        imported += 1;
+        if (!item.folderPath.length) continue;
+        const folder = ensureFolderChain(item.folderPath);
+        if (folder && folder.bookmarkIds.length < BOOKMARK_FOLDER_MEMBER_LIMIT) {
+          folder.bookmarkIds.push(bookmark.id);
+        }
+      }
+      if (imported) this.#commit();
+      return { imported, skipped };
+    } catch (error) {
+      console.warn(`Unable to import bookmarks: ${error?.message}`);
+      return null;
+    }
+  }
+
+  createBookmarkFolder(options = {}) {
+    if (
+      !options ||
+      typeof options !== "object" ||
+      Array.isArray(options) ||
+      this.#state.bookmarkFolders.length >= BOOKMARK_FOLDER_LIMIT
+    ) {
+      return null;
+    }
+    const requestedBookmarkIds = Object.hasOwn(options, "bookmarkIds")
+      ? options.bookmarkIds
+      : [];
+    if (
+      !Array.isArray(requestedBookmarkIds) ||
+      requestedBookmarkIds.length > BOOKMARK_FOLDER_MEMBER_LIMIT
+    ) {
+      return null;
+    }
+    const usableBookmarkIds = [];
+    const seen = new Set();
+    for (const requestedId of requestedBookmarkIds) {
+      if (!validId(requestedId)) return null;
+      const bookmark = this.#state.bookmarks.find(item => item.id === requestedId);
+      if (!bookmark) return null;
+      if (!seen.has(requestedId)) {
+        seen.add(requestedId);
+        usableBookmarkIds.push(requestedId);
+      }
+    }
+    for (const bookmarkId of usableBookmarkIds) {
+      this.#removeBookmarkFromFolders(bookmarkId);
+    }
+    let parentId = "";
+    if (Object.hasOwn(options, "parentId") && options.parentId !== null) {
+      if (!validId(options.parentId)) return null;
+      const parent = this.#state.bookmarkFolders.find(
+        item => item.id === options.parentId
+      );
+      if (
+        !parent ||
+        this.#bookmarkFolderDepth(parent.id) + 1 >= BOOKMARK_FOLDER_DEPTH_LIMIT
+      ) {
+        return null;
+      }
+      parentId = parent.id;
+    }
+    const folder = {
+      id: randomUUID(),
+      name: safeTitle(options.name, "Folder").slice(0, 80),
+      parentId,
+      bookmarkIds: usableBookmarkIds,
+      expanded: true,
+    };
+    this.#state.bookmarkFolders.push(folder);
+    this.#commit();
+    return folder.id;
+  }
+
+  /** Number of ancestors above a folder (0 for a top-level folder). */
+  #bookmarkFolderDepth(id) {
+    const foldersById = new Map(
+      this.#state.bookmarkFolders.map(folder => [folder.id, folder])
+    );
+    let depth = 0;
+    let current = foldersById.get(id);
+    while (current?.parentId && depth < BOOKMARK_FOLDER_DEPTH_LIMIT + 1) {
+      current = foldersById.get(current.parentId);
+      depth += 1;
+    }
+    return depth;
+  }
+
+  #bookmarkFolderDescendantIds(id) {
+    const descendants = new Set();
+    let added = true;
+    while (added) {
+      added = false;
+      for (const folder of this.#state.bookmarkFolders) {
+        if (descendants.has(folder.id)) continue;
+        if (folder.parentId === id || descendants.has(folder.parentId)) {
+          descendants.add(folder.id);
+          added = true;
+        }
+      }
+    }
+    return descendants;
+  }
+
+  moveBookmarkFolder({ id, parentId } = {}) {
+    if (!validId(id)) return false;
+    const folder = this.#state.bookmarkFolders.find(item => item.id === id);
+    if (!folder) return false;
+    let targetParentId = "";
+    if (parentId !== null && parentId !== "") {
+      if (!validId(parentId) || parentId === id) return false;
+      const parent = this.#state.bookmarkFolders.find(item => item.id === parentId);
+      if (!parent || this.#bookmarkFolderDescendantIds(id).has(parentId)) {
+        return false;
+      }
+      // The moved subtree keeps its own height; the new chain must still fit.
+      const subtreeHeight = Math.max(
+        0,
+        ...[...this.#bookmarkFolderDescendantIds(id)].map(
+          childId => this.#bookmarkFolderDepth(childId) - this.#bookmarkFolderDepth(id)
+        )
+      );
+      if (
+        this.#bookmarkFolderDepth(parent.id) + 1 + subtreeHeight >=
+        BOOKMARK_FOLDER_DEPTH_LIMIT
+      ) {
+        return false;
+      }
+      targetParentId = parent.id;
+    }
+    if (folder.parentId === targetParentId) return true;
+    folder.parentId = targetParentId;
+    this.#commit();
+    return true;
+  }
+
+  toggleBookmarkFolder(id) {
+    const folder = this.#state.bookmarkFolders.find(item => item.id === id);
+    if (!folder) return false;
+    folder.expanded = !folder.expanded;
+    this.#commit();
+    return folder.expanded;
+  }
+
+  renameBookmarkFolder(id, name) {
+    if (!validId(id) || typeof name !== "string") return false;
+    const folder = this.#state.bookmarkFolders.find(item => item.id === id);
+    const value = name.trim().slice(0, 80);
+    if (!folder || !value) return false;
+    if (folder.name === value) return true;
+    folder.name = value;
+    this.#commit();
+    return true;
+  }
+
+  deleteBookmarkFolder(id) {
+    if (!validId(id)) return false;
+    const index = this.#state.bookmarkFolders.findIndex(item => item.id === id);
+    if (index < 0) return false;
+    const [removed] = this.#state.bookmarkFolders.splice(index, 1);
+    for (const folder of this.#state.bookmarkFolders) {
+      if (folder.parentId === id) folder.parentId = removed.parentId || "";
+    }
+    this.#commit();
+    return true;
+  }
+
+  async createLiveFolder({ url, name } = {}) {
+    const sourceUrl = normalizeLiveFolderSourceUrl(url);
+    if (
+      !sourceUrl ||
+      this.#state.liveFolders.length >= LIVE_FOLDER_LIMIT ||
+      this.#state.liveFolders.some(folder => folder.sourceUrl === sourceUrl)
+    ) {
+      return null;
+    }
+    const folder = {
+      id: randomUUID(),
+      name: safeTitle(name, "Live Folder").slice(0, 80),
+      sourceUrl,
+      expanded: true,
+      items: [],
+      refreshedAt: 0,
+      status: "ok",
+    };
+    this.#state.liveFolders.push(folder);
+    this.#commit();
+    await this.#refreshLiveFolder(folder.id, { manual: true });
+    return folder.id;
+  }
+
+  toggleLiveFolder(id) {
+    const folder = this.#state.liveFolders.find(item => item.id === id);
+    if (!folder) return false;
+    folder.expanded = !folder.expanded;
+    this.#commit();
+    return folder.expanded;
+  }
+
+  renameLiveFolder(id, name) {
+    if (!validId(id) || typeof name !== "string") return false;
+    const folder = this.#state.liveFolders.find(item => item.id === id);
+    const value = name.trim().slice(0, 80);
+    if (!folder || !value) return false;
+    if (folder.name === value) return true;
+    folder.name = value;
+    this.#commit();
+    return true;
+  }
+
+  deleteLiveFolder(id) {
+    if (!validId(id)) return false;
+    const index = this.#state.liveFolders.findIndex(item => item.id === id);
+    if (index < 0) return false;
+    this.#state.liveFolders.splice(index, 1);
+    this.#commit();
+    return true;
+  }
+
+  refreshLiveFolder(id) {
+    if (!validId(id)) return Promise.resolve(false);
+    return this.#refreshLiveFolder(id, { manual: true });
+  }
+
+  #refreshStaleLiveFolders() {
+    for (const folder of this.#state.liveFolders) {
+      void this.#refreshLiveFolder(folder.id);
+    }
+  }
+
+  async #refreshLiveFolder(id, { manual = false } = {}) {
+    const folder = this.#state.liveFolders.find(item => item.id === id);
+    if (!folder || this.#destroying || this.#liveFolderRefreshes.has(id)) {
+      return false;
+    }
+    const minimumAge = manual
+      ? LIVE_FOLDER_MANUAL_REFRESH_MS
+      : LIVE_FOLDER_STALE_MS;
+    if (folder.refreshedAt && Date.now() - folder.refreshedAt < minimumAge) {
+      return false;
+    }
+    const initialRefresh = folder.refreshedAt === 0;
+    this.#liveFolderRefreshes.add(id);
+    try {
+      const feed = await fetchFeed(folder.sourceUrl, {
+        fetchImpl: this.#liveFolderFetch || globalThis.fetch,
+      });
+      const target = this.#state.liveFolders.find(item => item.id === id);
+      if (!target || this.#destroying) return false;
+      const itemUrls = new Set();
+      const items = [];
+      for (const entry of feed.items) {
+        if (items.length === LIVE_FOLDER_ITEM_LIMIT) break;
+        const itemUrl = normalizeLiveFolderSourceUrl(entry.url);
+        if (!itemUrl || itemUrls.has(itemUrl)) continue;
+        itemUrls.add(itemUrl);
+        items.push({
+          url: itemUrl,
+          title: safeTitle(entry.title, itemUrl).slice(0, 300),
+        });
+      }
+      target.items = items;
+      target.status = "ok";
+      target.refreshedAt = Date.now();
+      if (initialRefresh && target.name === "Live Folder" && feed.title) {
+        target.name = feed.title.slice(0, 80);
+      }
+      this.#commit();
+      return true;
+    } catch {
+      const target = this.#state.liveFolders.find(item => item.id === id);
+      if (!target || this.#destroying) return false;
+      target.status = "error";
+      target.refreshedAt = Date.now();
+      this.#commit();
+      return false;
+    } finally {
+      this.#liveFolderRefreshes.delete(id);
+    }
   }
 
   queryHistory(payload = {}) {
@@ -1476,6 +2399,9 @@ export class BrowserController {
       return false;
     }
 
+    this.#restoreDiscardedTab(source);
+    this.#restoreDiscardedTab(target);
+
     const sourceGroup = this.#splitForTab(source.id);
     const targetGroup = this.#splitForTab(target.id);
     if (sourceGroup && targetGroup && sourceGroup.id === targetGroup.id) {
@@ -1714,6 +2640,518 @@ export class BrowserController {
     return true;
   }
 
+  #container(id) {
+    return this.#state.containers.find(container => container.id === id);
+  }
+
+  createContainer(options = {}) {
+    if (
+      !options ||
+      typeof options !== "object" ||
+      Array.isArray(options) ||
+      this.#state.containers.length >= CONTAINER_LIMIT
+    ) {
+      return null;
+    }
+    const container = {
+      id: randomUUID(),
+      name: safeTitle(options.name, "Container").slice(0, 80),
+      color: normalizeWorkspaceColor(options.color, "#7cc4ff"),
+      proxy: "",
+      userAgent: "",
+    };
+    this.#state.containers.push(container);
+    this.#commit();
+    return container.id;
+  }
+
+  renameContainer(id, name) {
+    if (!validId(id) || typeof name !== "string") return false;
+    const container = this.#container(id);
+    const value = name.trim().slice(0, 80);
+    if (!container || !value) return false;
+    if (container.name === value) return true;
+    container.name = value;
+    this.#commit();
+    return true;
+  }
+
+  setContainerColor(id, color) {
+    if (!validId(id)) return false;
+    const container = this.#container(id);
+    if (!container) return false;
+    const value = normalizeWorkspaceColor(color, "");
+    if (!value) return false;
+    if (container.color === value) return true;
+    container.color = value;
+    this.#commit();
+    return true;
+  }
+
+  async setContainerProxy(id, proxy) {
+    if (!validId(id) || typeof proxy !== "string") return false;
+    const container = this.#container(id);
+    if (!container) return false;
+    const raw = proxy.trim();
+    const value = raw ? normalizeContainerProxy(raw) : "";
+    if (raw && !value) return false;
+    if (container.proxy === value) return true;
+    container.proxy = value;
+    await this.#applyContainerProxy(container);
+    this.#commit();
+    return true;
+  }
+
+  /**
+   * The pinned identity for a tab's container, or "" when its container
+   * (if any) does not pin one. A container User-Agent replaces the default
+   * desktop identity everywhere except an explicit per-tab
+   * Request Mobile/Desktop override, which stays strongest.
+   */
+  #containerUserAgentForTab(tab) {
+    if (!tab?.containerId) return "";
+    return this.#container(tab.containerId)?.userAgent || "";
+  }
+
+  #defaultUserAgentForTab(tab) {
+    return this.#containerUserAgentForTab(tab) || this.#desktopUserAgent;
+  }
+
+  setContainerUserAgent(id, userAgent) {
+    if (!validId(id) || typeof userAgent !== "string") return false;
+    const container = this.#container(id);
+    if (!container) return false;
+    const raw = userAgent.trim();
+    const value = raw ? normalizeContainerUserAgent(raw) : "";
+    if (raw && !value) return false;
+    if (container.userAgent === value) return true;
+    container.userAgent = value;
+    for (const tab of this.#state.tabs) {
+      if (tab.containerId !== id) continue;
+      if (this.#uaOverrides.has(tab.id)) continue;
+      const contents = this.#safeViewContents(this.#viewFor(tab.id));
+      if (!contents) continue;
+      if (value) this.#cancelAdaptiveProbe(tab.id, true);
+      try {
+        contents.setUserAgent(
+          value || this.#desktopUserAgent || contents.session.getUserAgent()
+        );
+        if (!tab.discarded && !tab.crashed) contents.reloadIgnoringCache();
+      } catch {
+        // A teardown-raced view keeps the policy change; the next view
+        // creation applies the container identity from state.
+      }
+    }
+    this.#commit();
+    return true;
+  }
+
+  async #applyContainerProxy(container) {
+    try {
+      const partitionSession = session.fromPartition(
+        `persist:chroma-container-${container.id}`
+      );
+      await partitionSession.setProxy(
+        container.proxy
+          ? { proxyRules: container.proxy }
+          : { mode: "system" }
+      );
+    } catch (error) {
+      console.warn(
+        `Unable to apply the container proxy [${safeErrorCode(error)}]`
+      );
+    }
+  }
+
+  async deleteContainer(id) {
+    if (!validId(id)) return false;
+    const index = this.#state.containers.findIndex(item => item.id === id);
+    if (index < 0) return false;
+    const memberTabs = this.#state.tabs.filter(tab => tab.containerId === id);
+    if (memberTabs.length && this.#state.tabs.length === memberTabs.length) {
+      // Closing every member of the only remaining tab set would leave the
+      // window empty; create a replacement default-container tab first.
+      const replacement = this.#createTabRecord({
+        workspaceId: this.#state.activeWorkspaceId,
+      });
+      if (this.#state.tabs.length >= TAB_COUNT_LIMIT) return false;
+      this.#state.tabs.push(replacement);
+      this.#createView(replacement);
+      this.#state.activeTabId = replacement.id;
+    }
+    for (const tab of memberTabs) {
+      await this.closeTab(tab.id);
+    }
+    this.#state.containers.splice(index, 1);
+    this.#commit();
+    try {
+      const partitionSession = session.fromPartition(
+        `persist:chroma-container-${id}`
+      );
+      await partitionSession.setProxy({ mode: "system" });
+      await partitionSession.clearStorageData();
+    } catch (error) {
+      console.warn(
+        `Unable to clear deleted container storage [${safeErrorCode(error)}]`
+      );
+    }
+    return true;
+  }
+
+  async reopenTabInContainer(id, containerId) {
+    if (!validId(id)) return null;
+    const tab = this.#tab(id);
+    if (!tab || tab.essential || tab.pinned || this.#splitForTab(tab.id)) {
+      return null;
+    }
+    const targetContainerId = typeof containerId === "string" ? containerId : "";
+    if (targetContainerId && !this.#container(targetContainerId)) return null;
+    if (tab.containerId === targetContainerId) return tab.id;
+    if (this.#state.tabs.length >= TAB_COUNT_LIMIT) return null;
+
+    // A WebContents cannot swap storage partitions in place, so reopening
+    // replaces the tab record while preserving its list position and folder
+    // membership under a new isolated view.
+    const wasActive = this.#state.activeTabId === tab.id;
+    const replacement = this.#createTabRecord({
+      url: tab.url,
+      workspaceId: tab.workspaceId,
+      containerId: targetContainerId,
+    });
+    replacement.title = tab.title;
+    const index = this.#state.tabs.indexOf(tab);
+    this.#state.tabs.splice(index + 1, 0, replacement);
+    for (const folder of this.#state.folders) {
+      const memberIndex = folder.tabIds.indexOf(tab.id);
+      if (memberIndex >= 0) folder.tabIds.splice(memberIndex + 1, 0, replacement.id);
+    }
+    this.#createView(replacement);
+    if (wasActive) {
+      this.#state.activeWorkspaceId = replacement.workspaceId;
+      this.#state.activeTabId = replacement.id;
+    }
+    this.#commit();
+    await this.closeTab(tab.id);
+    if (wasActive && this.#state.activeTabId !== replacement.id) {
+      this.selectTab(replacement.id);
+    }
+    return replacement.id;
+  }
+
+  #glanceBounds() {
+    if (!this.#contentBounds) return null;
+    const insetX = Math.round(this.#contentBounds.width * 0.08);
+    const insetY = Math.round(this.#contentBounds.height * 0.08);
+    return {
+      x: this.#contentBounds.x + insetX,
+      y: this.#contentBounds.y + insetY,
+      width: Math.max(320, this.#contentBounds.width - insetX * 2),
+      height: Math.max(240, this.#contentBounds.height - insetY * 2),
+    };
+  }
+
+  openGlance(url, sourceTabId = this.#state.activeTabId) {
+    if (this.#destroying) return false;
+    const sourceTab = this.#tab(sourceTabId);
+    if (!sourceTab || sourceTab.id !== this.#state.activeTabId) return false;
+    // Glance previews take a literal link URL, not address-bar input, so an
+    // unsafe scheme is rejected outright instead of becoming a search query.
+    if (
+      typeof url !== "string" ||
+      url.length > TAB_URL_MAX_LENGTH ||
+      !isSafePageUrl(url) ||
+      !/^https?:\/\//i.test(url)
+    ) {
+      return false;
+    }
+    const targetUrl = new URL(url).href;
+    const bounds = this.#glanceBounds();
+    if (!bounds) return false;
+    this.closeGlance();
+
+    const view = new WebContentsView({
+      webPreferences: {
+        partition: this.#partitionForTab(sourceTab),
+        sandbox: true,
+        contextIsolation: true,
+        nodeIntegration: false,
+        webSecurity: true,
+        allowRunningInsecureContent: false,
+        spellcheck: true,
+      },
+    });
+    view.setBorderRadius(process.platform === "darwin" ? 14 : 10);
+    this.#window.contentView.addChildView(view);
+    view.setBounds(bounds);
+    view.setVisible(true);
+    const glance = { view, sourceTabId: sourceTab.id, url: targetUrl };
+    this.#glance = glance;
+
+    const contents = view.webContents;
+    this.#configureSession(contents.session);
+    contents.setUserAgent(
+      this.#defaultUserAgentForTab(sourceTab) || contents.session.getUserAgent()
+    );
+    contents.setWindowOpenHandler(({ url: popupUrl }) => {
+      if (this.#glance === glance && isSafePageUrl(popupUrl)) {
+        this.#runDetached(this.dispatch(commands.createTab, {
+          url: popupUrl,
+          workspaceId: sourceTab.workspaceId,
+        }), "Unable to open a Glance popup as a tab");
+      }
+      return { action: "deny" };
+    });
+    contents.on("before-input-event", (event, input) => {
+      if (this.#glance !== glance || input.type !== "keyDown") return;
+      if (input.key === "Escape") {
+        event.preventDefault();
+        this.closeGlance();
+      } else if (
+        input.key === "Enter" &&
+        (process.platform === "darwin" ? input.meta : input.control)
+      ) {
+        event.preventDefault();
+        this.#runDetached(
+          Promise.resolve(this.promoteGlance()),
+          "Unable to promote the Glance preview"
+        );
+      }
+    });
+    contents.once("render-process-gone", () => {
+      if (this.#glance === glance) this.closeGlance();
+    });
+    void contents.loadURL(targetUrl).catch(error => {
+      if (this.#glance === glance && error?.code !== "ERR_ABORTED") {
+        console.warn(`Unable to load the Glance preview [${safeErrorCode(error)}]`);
+      }
+    });
+    contents.focus();
+    this.#notify(false);
+    return true;
+  }
+
+  closeGlance() {
+    const glance = this.#glance;
+    if (!glance) return false;
+    this.#glance = null;
+    try {
+      glance.view.setVisible(false);
+      if (!this.#window.isDestroyed()) {
+        this.#window.contentView.removeChildView(glance.view);
+      }
+      const contents = this.#safeViewContents(glance.view, { allowDestroyed: true });
+      if (contents && !contents.isDestroyed()) {
+        contents.close({ waitForBeforeUnload: false });
+      }
+    } catch (error) {
+      console.warn(`Unable to close the Glance preview [${safeErrorCode(error)}]`);
+    }
+    if (!this.#destroying) {
+      this.#focusTab(this.#state.activeTabId);
+      this.#notify(false);
+    }
+    return true;
+  }
+
+  async promoteGlance() {
+    const glance = this.#glance;
+    if (!glance) return null;
+    let currentUrl = glance.url;
+    try {
+      const contents = this.#safeViewContents(glance.view);
+      const liveUrl = contents?.getURL();
+      if (liveUrl && isSafePageUrl(liveUrl)) currentUrl = liveUrl;
+    } catch {
+      // Fall back to the originally requested URL.
+    }
+    this.closeGlance();
+    return this.createTab({ url: currentUrl });
+  }
+
+  #syncGlance() {
+    const glance = this.#glance;
+    if (!glance) return;
+    if (
+      this.#state.activeTabId !== glance.sourceTabId ||
+      (this.#chromeModalOpen && !this.#chromeModalUsesOverlay) ||
+      (this.#tabDragActive && !this.#tabDragUsesOverlay)
+    ) {
+      this.closeGlance();
+      return;
+    }
+    const bounds = this.#glanceBounds();
+    if (!bounds) return;
+    try {
+      glance.view.setBounds(bounds);
+    } catch {
+      this.closeGlance();
+    }
+  }
+
+  #extensionPopupBounds() {
+    if (!this.#contentBounds) return null;
+    const width = Math.min(380, Math.max(300, Math.round(this.#contentBounds.width * 0.3)));
+    const height = Math.min(520, Math.max(240, Math.round(this.#contentBounds.height * 0.7)));
+    return {
+      x: this.#contentBounds.x + this.#contentBounds.width - width - 12,
+      y: this.#contentBounds.y + 12,
+      width,
+      height,
+    };
+  }
+
+  /**
+   * Opens an extension's action popup as a transient overlay anchored to the
+   * top-right of the page area. The popup document comes only from the
+   * extension's own chrome-extension:// origin; http(s) links it opens are
+   * routed to real tabs. Invoking it again for the same extension closes it.
+   */
+  openExtensionPopup(id) {
+    if (this.#destroying || !this.#extensionService || !validId(id)) return false;
+    if (this.#extensionPopup?.extensionId === id) {
+      this.closeExtensionPopup();
+      return true;
+    }
+    const entry = this.#extensionService
+      .snapshot()
+      .find(extension => extension.id === id);
+    if (!entry?.popupPath) return false;
+    const bounds = this.#extensionPopupBounds();
+    if (!bounds) return false;
+    this.closeExtensionPopup();
+
+    const view = new WebContentsView({
+      webPreferences: {
+        partition: "persist:chroma-main",
+        sandbox: true,
+        contextIsolation: true,
+        nodeIntegration: false,
+        webSecurity: true,
+        allowRunningInsecureContent: false,
+      },
+    });
+    view.setBorderRadius(process.platform === "darwin" ? 12 : 8);
+    this.#window.contentView.addChildView(view);
+    view.setBounds(bounds);
+    view.setVisible(true);
+    const popup = { view, extensionId: entry.id };
+    this.#extensionPopup = popup;
+
+    const contents = view.webContents;
+    contents.setWindowOpenHandler(({ url: openedUrl }) => {
+      if (this.#extensionPopup === popup && isSafePageUrl(openedUrl)) {
+        this.#runDetached(this.dispatch(commands.createTab, {
+          url: openedUrl,
+        }), "Unable to open an extension-popup link as a tab");
+      }
+      return { action: "deny" };
+    });
+    contents.on("before-input-event", (event, input) => {
+      if (this.#extensionPopup !== popup || input.type !== "keyDown") return;
+      if (input.key === "Escape") {
+        event.preventDefault();
+        this.closeExtensionPopup();
+      }
+    });
+    contents.once("render-process-gone", () => {
+      if (this.#extensionPopup === popup) this.closeExtensionPopup();
+    });
+    const popupUrl = `chrome-extension://${entry.id}/${entry.popupPath}`;
+    void contents.loadURL(popupUrl).catch(error => {
+      if (this.#extensionPopup === popup && error?.code !== "ERR_ABORTED") {
+        console.warn(`Unable to load the extension popup [${safeErrorCode(error)}]`);
+        this.closeExtensionPopup();
+      }
+    });
+    contents.focus();
+    this.#notify(false);
+    return true;
+  }
+
+  closeExtensionPopup() {
+    const popup = this.#extensionPopup;
+    if (!popup) return false;
+    this.#extensionPopup = null;
+    try {
+      popup.view.setVisible(false);
+      if (!this.#window.isDestroyed()) {
+        this.#window.contentView.removeChildView(popup.view);
+      }
+      const contents = this.#safeViewContents(popup.view, { allowDestroyed: true });
+      if (contents && !contents.isDestroyed()) {
+        contents.close({ waitForBeforeUnload: false });
+      }
+    } catch (error) {
+      console.warn(`Unable to close the extension popup [${safeErrorCode(error)}]`);
+    }
+    if (!this.#destroying) {
+      this.#focusTab(this.#state.activeTabId);
+      this.#notify(false);
+    }
+    return true;
+  }
+
+  #syncExtensionPopup() {
+    const popup = this.#extensionPopup;
+    if (!popup) return;
+    if (
+      (this.#chromeModalOpen && !this.#chromeModalUsesOverlay) ||
+      (this.#tabDragActive && !this.#tabDragUsesOverlay)
+    ) {
+      this.closeExtensionPopup();
+      return;
+    }
+    const bounds = this.#extensionPopupBounds();
+    if (!bounds) return;
+    try {
+      popup.view.setBounds(bounds);
+    } catch {
+      this.closeExtensionPopup();
+    }
+  }
+
+  async installExtension(sourcePath) {
+    if (!this.#extensionService || this.#destroying) return null;
+    let directory = typeof sourcePath === "string" && sourcePath.trim()
+      ? sourcePath
+      : null;
+    if (!directory) {
+      const picked = await dialog.showOpenDialog(this.#window, {
+        title: "Choose an unpacked extension folder",
+        properties: ["openDirectory"],
+      });
+      if (picked.canceled || !picked.filePaths?.length) return null;
+      directory = picked.filePaths[0];
+    }
+    try {
+      const entry = await this.#extensionService.install(directory);
+      return entry?.id || null;
+    } catch (error) {
+      console.warn(`Unable to install extension: ${error?.message}`);
+      return null;
+    }
+  }
+
+  async removeExtension(id) {
+    if (!this.#extensionService || !validId(id)) return false;
+    try {
+      return await this.#extensionService.remove(id);
+    } catch (error) {
+      console.warn(`Unable to remove extension: ${error?.message}`);
+      return false;
+    }
+  }
+
+  async reloadExtension(id) {
+    if (!this.#extensionService || !validId(id)) return false;
+    try {
+      return await this.#extensionService.reload(id);
+    } catch (error) {
+      console.warn(`Unable to reload extension: ${error?.message}`);
+      return false;
+    }
+  }
+
   toggleSidebar() {
     this.#state.settings.sidebarCollapsed = !this.#state.settings.sidebarCollapsed;
     if (!this.#state.settings.sidebarCollapsed) {
@@ -1781,6 +3219,25 @@ export class BrowserController {
     if (this.#destroyPromise) return this.#destroyPromise;
     this.#acceptCommands = false;
     this.#destroying = true;
+    this.closeGlance();
+    this.closeExtensionPopup();
+    for (const entry of this.#pendingAuthRequests.splice(0)) {
+      try {
+        entry.callback();
+      } catch {
+        // Cancelling a challenge during teardown is best-effort.
+      }
+    }
+    if (this.#mediaKeyRegistered) {
+      try {
+        globalShortcut.unregister("MediaPlayPause");
+      } catch {
+        // Shutdown continues regardless of shortcut teardown.
+      }
+      this.#mediaKeyRegistered = false;
+    }
+    clearInterval(this.#liveFolderSweepTimer);
+    this.#liveFolderSweepTimer = null;
     this.#denyConfiguredSessionPermissions();
     this.#clearSidebarOverlayHideTimer();
     this.#stopSidebarOverlayPointerWatch();
@@ -2153,12 +3610,24 @@ export class BrowserController {
     }
   }
 
+  #partitionForTab(tab) {
+    const containerId = typeof tab?.containerId === "string" ? tab.containerId : "";
+    if (
+      containerId &&
+      isPartitionSafeContainerId(containerId) &&
+      this.#state.containers?.some(container => container.id === containerId)
+    ) {
+      return `persist:chroma-container-${containerId}`;
+    }
+    return "persist:chroma-main";
+  }
+
   #createView(tab) {
     tab.loading = true;
     tab.crashed = false;
     const view = new WebContentsView({
       webPreferences: {
-        partition: "persist:chroma-main",
+        partition: this.#partitionForTab(tab),
         sandbox: true,
         contextIsolation: true,
         nodeIntegration: false,
@@ -2189,7 +3658,7 @@ export class BrowserController {
       timer: null,
     });
     this.#wireWebContents(tab, view);
-    view.webContents.setUserAgent(this.#desktopUserAgent);
+    view.webContents.setUserAgent(this.#defaultUserAgentForTab(tab));
     view.webContents.setAudioMuted(Boolean(tab.muted));
     // Electron 43 initializes sandbox startup data asynchronously. Queue every
     // navigation behind the initial blank document, and version requests so a
@@ -2441,6 +3910,10 @@ export class BrowserController {
     contents.on("media-started-playing", () => {
       if (!isCurrentView()) return;
       tab.audible = true;
+      // Re-inserting keeps the set ordered by most recent playback, which
+      // is what the hardware media key targets.
+      this.#mediaTabs.delete(tab.id);
+      this.#mediaTabs.add(tab.id);
       this.#notify(false);
     });
     contents.on("media-paused", () => {
@@ -2851,9 +4324,41 @@ export class BrowserController {
             }), "Unable to open context-menu link");
           },
         },
+        {
+          label: "Preview Link in Glance",
+          click: () => {
+            if (!this.#isCurrentTabView(tab, view, contents)) return;
+            this.openGlance(params.linkURL, tab.id);
+          },
+        },
         { label: "Copy Link", click: () => clipboard.writeText(params.linkURL) },
         { type: "separator" }
       );
+    }
+    if (["video", "audio"].includes(params.mediaType)) {
+      template.push({
+        label: "Play or Pause Media",
+        click: () => {
+          if (!this.#isCurrentTabView(tab, view, contents)) return;
+          this.#runDetached(
+            this.toggleMediaPlayback(tab.id),
+            "Unable to toggle media playback"
+          );
+        },
+      });
+      if (params.mediaType === "video") {
+        template.push({
+          label: "Toggle Picture in Picture",
+          click: () => {
+            if (!this.#isCurrentTabView(tab, view, contents)) return;
+            this.#runDetached(
+              this.togglePictureInPicture(tab.id),
+              "Unable to toggle Picture in Picture"
+            );
+          },
+        });
+      }
+      template.push({ type: "separator" });
     }
     if (params.isEditable) {
       template.push(
@@ -2869,10 +4374,22 @@ export class BrowserController {
     } else if (params.selectionText) {
       template.push({ role: "copy" }, { type: "separator" });
     }
+    const uaOverride = this.#uaOverrides.get(tab.id) || "auto";
     template.push(
       { label: "Back", enabled: tab.canGoBack, click: () => this.goBack(tab.id) },
       { label: "Forward", enabled: tab.canGoForward, click: () => this.goForward(tab.id) },
       { label: "Reload", click: () => this.reload(tab.id) },
+      { type: "separator" },
+      {
+        label: uaOverride === "mobile" ? "Request Desktop Site" : "Request Mobile Site",
+        click: () => {
+          if (!this.#isCurrentTabView(tab, view, contents)) return;
+          this.setTabUserAgentMode(
+            tab.id,
+            uaOverride === "mobile" ? "auto" : "mobile"
+          );
+        },
+      },
       { type: "separator" },
       { label: tab.essential ? "Remove from Essentials" : "Add to Essentials", click: () => this.toggleEssential(tab.id) },
       {
@@ -3116,6 +4633,8 @@ export class BrowserController {
       }
     }
     this.#syncSidebarOverlay();
+    this.#syncGlance();
+    this.#syncExtensionPopup();
     if (recoveredFromNativeFailure) this.#notify(false);
   }
 
@@ -3129,6 +4648,12 @@ export class BrowserController {
   }
 
   #scheduleAdaptiveLayout(id, view) {
+    // A manual Request Mobile/Desktop override owns this tab's UA outright;
+    // the automatic narrow-pane machinery stands down until "auto" returns.
+    // A container-pinned User-Agent is likewise a fixed identity, so the
+    // mobile-adaptation machinery must not rewrite it.
+    if (this.#uaOverrides.has(id)) return;
+    if (this.#containerUserAgentForTab(this.#tab(id))) return;
     const adaptive = this.#adaptiveViews.get(id);
     const tab = this.#tab(id);
     const contents = this.#liveAdaptiveContents(id, view);
@@ -3583,6 +5108,12 @@ export class BrowserController {
     });
   }
 
+  #removeBookmarkFromFolders(id) {
+    for (const folder of this.#state.bookmarkFolders) {
+      folder.bookmarkIds = folder.bookmarkIds.filter(bookmarkId => bookmarkId !== id);
+    }
+  }
+
   #removeTabFromFoldersAndSplits(id) {
     for (const folder of this.#state.folders) {
       folder.tabIds = folder.tabIds.filter(tabId => tabId !== id);
@@ -3693,6 +5224,8 @@ export class BrowserController {
     if (!view) return true;
     if (this.#destroyingViewIds.has(id)) return false;
     this.#destroyingViewIds.add(id);
+    this.#mediaTabs.delete(id);
+    this.#uaOverrides.delete(id);
     this.#cancelAdaptiveProbe(id, true);
     let closed = false;
     let contents = null;

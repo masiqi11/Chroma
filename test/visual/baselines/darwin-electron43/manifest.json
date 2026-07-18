@@ -68,9 +68,9 @@
         },
         "tabsList": {
           "x": 8,
-          "y": 284.297,
+          "y": 349.297,
           "width": 212,
-          "height": 390.703
+          "height": 325.703
         },
         "splitCapsule": null,
         "splitRows": [],
@@ -135,13 +135,13 @@
         },
         "tabsList": {
           "x": 8,
-          "y": 284.297,
+          "y": 349.297,
           "width": 212,
-          "height": 390.703
+          "height": 325.703
         },
         "splitCapsule": {
           "x": 11,
-          "y": 354.297,
+          "y": 419.297,
           "width": 206,
           "height": 36
         },
@@ -149,14 +149,14 @@
           {
             "id": "tab-alpha",
             "x": 11,
-            "y": 354.297,
+            "y": 419.297,
             "width": 123.594,
             "height": 36
           },
           {
             "id": "tab-beta",
             "x": 134.594,
-            "y": 354.297,
+            "y": 419.297,
             "width": 82.391,
             "height": 36
           }
@@ -244,9 +244,9 @@
         },
         "tabsList": {
           "x": 8,
-          "y": 284.297,
+          "y": 349.297,
           "width": 212,
-          "height": 390.703
+          "height": 325.703
         },
         "splitCapsule": null,
         "splitRows": [],
@@ -427,9 +427,9 @@
           },
           "tabsList": {
             "x": 14,
-            "y": 289.906,
+            "y": 354.906,
             "width": 210,
-            "height": 379.094
+            "height": 314.094
           },
           "targetComposited": true
         }
@@ -483,13 +483,13 @@
         },
         "tabsList": {
           "x": 8,
-          "y": 284.297,
+          "y": 349.297,
           "width": 212,
-          "height": 390.703
+          "height": 325.703
         },
         "splitCapsule": {
           "x": 11,
-          "y": 354.297,
+          "y": 419.297,
           "width": 206,
           "height": 69
         },
@@ -497,21 +497,21 @@
           {
             "id": "tab-alpha",
             "x": 11,
-            "y": 354.297,
+            "y": 419.297,
             "width": 103,
             "height": 69
           },
           {
             "id": "tab-beta",
             "x": 114,
-            "y": 354.297,
+            "y": 419.297,
             "width": 103,
             "height": 34.5
           },
           {
             "id": "tab-gamma",
             "x": 114,
-            "y": 388.797,
+            "y": 453.797,
             "width": 103,
             "height": 34.5
           }
@@ -613,13 +613,13 @@
         },
         "tabsList": {
           "x": 8,
-          "y": 284.297,
+          "y": 349.297,
           "width": 212,
-          "height": 390.703
+          "height": 325.703
         },
         "splitCapsule": {
           "x": 11,
-          "y": 354.297,
+          "y": 419.297,
           "width": 206,
           "height": 69
         },
@@ -627,28 +627,28 @@
           {
             "id": "tab-alpha",
             "x": 11,
-            "y": 354.297,
+            "y": 419.297,
             "width": 103,
             "height": 34.5
           },
           {
             "id": "tab-beta",
             "x": 11,
-            "y": 388.797,
+            "y": 453.797,
             "width": 103,
             "height": 34.5
           },
           {
             "id": "tab-delta",
             "x": 114,
-            "y": 388.797,
+            "y": 453.797,
             "width": 103,
             "height": 34.5
           },
           {
             "id": "tab-gamma",
             "x": 114,
-            "y": 354.297,
+            "y": 419.297,
             "width": 103,
             "height": 34.5
           }

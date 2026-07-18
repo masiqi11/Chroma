@@ -2,8 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  BOOKMARK_FOLDER_LIMIT,
+  BOOKMARK_FOLDER_MEMBER_LIMIT,
   FOLDER_MEMBER_LIMIT,
   LIBRARY_CONTAINER_LIMIT,
+  repairBookmarkTopology,
   repairLibraryTopology,
 } from "../src/shared/state-invariants.mjs";
 
@@ -394,4 +397,178 @@ test("uses deterministic fallback IDs when the factory cannot produce one", () =
   );
   assert.equal(result.splitGroups[0].id, "repaired-split-1");
   assert.equal(result.stats.totalRepairs, 3);
+});
+
+const bookmarks = [
+  { id: "bm-1" },
+  { id: "bm-2" },
+  { id: "bm-3" },
+];
+
+test("keeps valid bookmark-folder topology and ordering unchanged", () => {
+  const bookmarkFolders = [
+    { id: "folder-a", name: "A", parentId: "", bookmarkIds: ["bm-1", "bm-2"], expanded: true },
+    { id: "folder-b", name: "B", parentId: "folder-a", bookmarkIds: ["bm-3"], expanded: false },
+  ];
+
+  const result = repairBookmarkTopology(
+    { bookmarks, bookmarkFolders },
+    () => "generated"
+  );
+
+  assert.deepEqual(result.bookmarkFolders, bookmarkFolders);
+  assert.deepEqual(result.stats, {
+    folderIdsRepaired: 0,
+    foldersRemoved: 0,
+    membershipsRemoved: 0,
+    parentsRepaired: 0,
+    totalRepairs: 0,
+  });
+});
+
+test("repairs bookmark-folder parents that cycle, self-reference, or dangle", () => {
+  const result = repairBookmarkTopology(
+    {
+      bookmarks,
+      bookmarkFolders: [
+        { id: "cycle-a", name: "CycleA", parentId: "cycle-b", bookmarkIds: [], expanded: true },
+        { id: "cycle-b", name: "CycleB", parentId: "cycle-a", bookmarkIds: [], expanded: true },
+        { id: "selfie", name: "Selfie", parentId: "selfie", bookmarkIds: [], expanded: true },
+        { id: "orphan", name: "Orphan", parentId: "missing-folder", bookmarkIds: [], expanded: true },
+        { id: "fine", name: "Fine", parentId: "cycle-a", bookmarkIds: [], expanded: true },
+      ],
+    },
+    () => "generated"
+  );
+
+  const parents = Object.fromEntries(
+    result.bookmarkFolders.map(folder => [folder.id, folder.parentId])
+  );
+  assert.equal(parents.selfie, "", "self-parenting resets to top level");
+  assert.equal(parents.orphan, "", "a dangling parent resets to top level");
+  assert.ok(
+    !(parents["cycle-a"] && parents["cycle-b"]),
+    "a parent cycle must be broken"
+  );
+  assert.equal(parents.fine, "cycle-a", "children of a repaired folder stay attached");
+  assert.ok(result.stats.parentsRepaired >= 3);
+});
+
+test("caps bookmark-folder nesting depth", () => {
+  const chain = Array.from({ length: 12 }, (_, index) => ({
+    id: `deep-${index}`,
+    name: `Deep ${index}`,
+    parentId: index === 0 ? "" : `deep-${index - 1}`,
+    bookmarkIds: [],
+    expanded: true,
+  }));
+
+  const result = repairBookmarkTopology(
+    { bookmarks: [], bookmarkFolders: chain },
+    () => "generated"
+  );
+
+  for (const folder of result.bookmarkFolders) {
+    let depth = 0;
+    let current = folder;
+    const byId = new Map(result.bookmarkFolders.map(item => [item.id, item]));
+    while (current.parentId) {
+      current = byId.get(current.parentId);
+      depth += 1;
+      assert.ok(depth <= 8, "no folder may sit deeper than the depth cap");
+    }
+  }
+  assert.ok(result.stats.parentsRepaired >= 1, "over-deep parents must be reset");
+});
+
+test("keeps each bookmark in only the first valid folder", () => {
+  const result = repairBookmarkTopology(
+    {
+      bookmarks,
+      bookmarkFolders: [
+        { id: "folder-a", name: "A", bookmarkIds: ["bm-1", "bm-2"], expanded: true },
+        { id: "folder-b", name: "B", bookmarkIds: ["bm-2", "bm-3"], expanded: true },
+      ],
+    },
+    () => "generated"
+  );
+
+  assert.deepEqual(result.bookmarkFolders[0].bookmarkIds, ["bm-1", "bm-2"]);
+  assert.deepEqual(result.bookmarkFolders[1].bookmarkIds, ["bm-3"]);
+  assert.equal(result.stats.membershipsRemoved, 1);
+});
+
+test("drops bookmark-folder membership referencing an unknown bookmark", () => {
+  const result = repairBookmarkTopology(
+    {
+      bookmarks,
+      bookmarkFolders: [
+        { id: "folder-a", name: "A", bookmarkIds: ["bm-1", "missing"], expanded: true },
+      ],
+    },
+    () => "generated"
+  );
+
+  assert.deepEqual(result.bookmarkFolders[0].bookmarkIds, ["bm-1"]);
+  assert.equal(result.stats.membershipsRemoved, 1);
+});
+
+test("keeps an explicitly empty bookmark folder as a durable entity", () => {
+  const result = repairBookmarkTopology(
+    {
+      bookmarks,
+      bookmarkFolders: [
+        { id: "folder-a", name: "Empty", bookmarkIds: [], expanded: true },
+      ],
+    },
+    () => "generated"
+  );
+
+  assert.equal(result.bookmarkFolders.length, 1);
+  assert.deepEqual(result.bookmarkFolders[0].bookmarkIds, []);
+});
+
+test("repairs colliding bookmark-folder IDs in their own namespace", () => {
+  const result = repairBookmarkTopology(
+    {
+      bookmarks,
+      bookmarkFolders: [
+        { id: "same-id", name: "First", bookmarkIds: ["bm-1"], expanded: true },
+        { id: "same-id", name: "Second", bookmarkIds: ["bm-2"], expanded: true },
+      ],
+    },
+    factory("same-id")
+  );
+
+  assert.equal(result.bookmarkFolders[0].id, "same-id");
+  assert.notEqual(result.bookmarkFolders[1].id, "same-id");
+  assert.equal(result.stats.folderIdsRepaired, 1);
+});
+
+test("bounds bookmark-folder entities and membership before repair", () => {
+  const manyFolders = Array.from({ length: BOOKMARK_FOLDER_LIMIT + 2 }, (_, index) => ({
+    id: `folder-${index}`,
+    name: `Folder ${index}`,
+    bookmarkIds: [],
+    expanded: true,
+  }));
+  const manyBookmarkIds = Array.from(
+    { length: BOOKMARK_FOLDER_MEMBER_LIMIT + 2 },
+    (_, index) => `bm-${index}`
+  );
+  manyFolders[0].bookmarkIds = manyBookmarkIds;
+  const manyBookmarks = manyBookmarkIds.map(id => ({ id }));
+
+  const result = repairBookmarkTopology(
+    { bookmarks: manyBookmarks, bookmarkFolders: manyFolders },
+    () => "generated"
+  );
+
+  assert.equal(result.bookmarkFolders.length, BOOKMARK_FOLDER_LIMIT);
+  assert.equal(
+    result.bookmarkFolders[0].bookmarkIds.length,
+    BOOKMARK_FOLDER_MEMBER_LIMIT
+  );
+  assert.equal(result.stats.foldersRemoved, 2);
+  assert.ok(result.stats.membershipsRemoved >= 2);
 });

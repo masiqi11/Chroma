@@ -32,6 +32,18 @@ const pinnedGrid = document.querySelector("#pinned-grid");
 const bookmarksSection = document.querySelector("#bookmarks-section");
 const bookmarksToggle = document.querySelector("#bookmarks-toggle");
 const bookmarksList = document.querySelector("#bookmarks-list");
+const bookmarkSearchInput = document.querySelector("#bookmark-search");
+const liveFoldersSection = document.querySelector("#live-folders-section");
+const liveFoldersList = document.querySelector("#live-folders-list");
+const extensionActions = document.querySelector("#extension-actions");
+const nowPlayingButton = document.querySelector("#now-playing-button");
+const authPrompt = document.querySelector("#auth-prompt");
+const authPromptForm = document.querySelector("#auth-prompt-form");
+const authPromptDescription = document.querySelector("#auth-prompt-description");
+const authPromptUsername = document.querySelector("#auth-prompt-username");
+const authPromptPassword = document.querySelector("#auth-prompt-password");
+const authPromptCancel = document.querySelector("#auth-prompt-cancel");
+let authPromptRequestId = null;
 const appearanceButton = document.querySelector("#appearance-button");
 const popoverLayer = document.querySelector("#popover-layer");
 const toastLayer = document.querySelector("#toast-layer");
@@ -84,6 +96,7 @@ let suggestionTimer = null;
 let contextTabId = null;
 let layoutFrame = 0;
 let tabPointerDrag = null;
+let bookmarkPointerDrag = null;
 let splitDividerDrag = null;
 let splitDividerPreviewFrame = 0;
 let dragTargetRow = null;
@@ -98,6 +111,7 @@ let addressWindowDrag = null;
 let suppressAddressClick = false;
 let sidebarOverlayCloseTimer = null;
 let bookmarksExpanded = true;
+let bookmarkSearchQuery = "";
 let historySearchTimer = null;
 let historyOpener = null;
 let historyAllTimeConfirmPending = false;
@@ -149,6 +163,7 @@ const iconPaths = Object.freeze({
   muted: '<path d="M4 10v4h4l5 4V6l-5 4z"/><path d="m17 10 4 4m0-4-4 4"/>',
   pin: '<path d="m9 3 6 6"/><path d="m14 4 6 6-4 2-4 4-4-4 4-4z"/><path d="m9 15-5 5"/>',
   globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3 3 15 0 18M12 3c-3 3-3 15 0 18"/>',
+  device: '<rect x="8" y="3" width="8" height="18" rx="2"/><path d="M11 18h2"/>',
   search: '<circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 4 4"/>',
   history: '<path d="M4 8V4m0 0h4"/><path d="M5 5a9 9 0 1 1-2 9"/><path d="M12 7v5l3 2"/>',
   tools: '<path d="m14 6 4-3 3 3-3 4"/><path d="M17 8 8 17l-1 4-4-4 4-1 9-9"/>',
@@ -157,6 +172,8 @@ const iconPaths = Object.freeze({
   star: '<path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-2.9-5.6 2.9 1.1-6.2L3 9.6l6.2-.9z"/>',
   starFilled: '<path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-2.9-5.6 2.9 1.1-6.2L3 9.6l6.2-.9z" fill="currentColor"/>',
   trash: '<path d="M4 7h16M9 7V4h6v3m3 0-1 14H7L6 7m4 4v6m4-6v6"/>',
+  moon: '<path d="M20 13.5A7.5 7.5 0 0 1 10.5 4 8 8 0 1 0 20 13.5z"/>',
+  rss: '<path d="M5 5a14 14 0 0 1 14 14"/><path d="M5 11a8 8 0 0 1 8 8"/><circle cx="6" cy="18" r="1.4" fill="currentColor" stroke="none"/>',
   check: '<path d="m5 12 4 4L19 6"/>',
   restore: '<path d="M4 8V4m0 0h4"/><path d="M5 5a9 9 0 1 1-2 9"/>',
   sidebar: '<rect x="3" y="4" width="18" height="16" rx="3"/><path d="M9 4v16"/>',
@@ -249,6 +266,12 @@ function initializeStaticIcons() {
     appearance: "appearance",
     "open-history": "history",
     "new-folder": "folder",
+    "new-bookmark-folder": "folder",
+    "bookmarks-menu": "more",
+    "new-live-folder": "plus",
+    "containers-menu": "globe",
+    "extensions-menu": "grid",
+    "now-playing-menu": "volume",
     "new-workspace": "plus",
   };
   for (const [action, name] of Object.entries(mapping)) {
@@ -259,6 +282,7 @@ function initializeStaticIcons() {
     document.querySelector('[data-icon-slot="plus"]'),
     icon("plus")
   );
+  replaceTrustedMarkup(document.querySelector(".live-folders-heading-icon"), icon("rss"));
   replaceTrustedMarkup(document.querySelector(".history-heading-icon"), icon("history"));
   replaceTrustedMarkup(document.querySelector(".history-close"), icon("close"));
   replaceTrustedMarkup(document.querySelector(".history-search-icon"), icon("search"));
@@ -336,6 +360,10 @@ function render() {
   renderEssentials();
   renderPinnedTabs();
   renderBookmarks();
+  renderLiveFolders();
+  renderExtensionActions();
+  renderNowPlayingButton();
+  renderAuthPrompt();
   renderTabs();
   renderWorkspaces();
   if (!historyPanel.hidden) renderHistoryPanel();
@@ -360,9 +388,38 @@ function renderEssentials() {
   replaceTrustedMarkup(
     grid,
     essentials
-      .map(tab => `<button class="essential-item${tab.id === state.activeTabId ? " is-active" : ""}" data-action="select-tab" data-tab-id="${escapeHtml(tab.id)}" title="${escapeHtml(tab.title)}">${faviconMarkup(tab)}</button>`)
+      .map(tab => `<button class="essential-item${tab.id === state.activeTabId ? " is-active" : ""}${tab.discarded ? " is-discarded" : ""}" data-action="select-tab" data-tab-id="${escapeHtml(tab.id)}" title="${escapeHtml(tab.title)}">${faviconMarkup(tab)}</button>`)
       .join("")
   );
+}
+
+function showEssentialMenu(tabId, anchor = null, point = null) {
+  const tab = state.tabs.find(item => item.id === tabId);
+  if (!tab?.essential) return;
+  closePopover();
+  const id = escapeHtml(tab.id);
+  const title = escapeHtml(tab.title || "Essential");
+  const popover = document.createElement("div");
+  popover.className = "popover folder-popover";
+  popover.dataset.popoverKind = "essential";
+  popover.setAttribute("role", "menu");
+  popover.setAttribute("aria-label", `${tab.title || "Essential"} actions`);
+  const canReset = Boolean(tab.essentialUrl);
+  const canUnload = !tab.discarded && tab.id !== state.activeTabId;
+  replaceTrustedMarkup(popover, `<div class="popover-title">${title}</div>
+    <button class="menu-item" type="button" role="menuitem" data-action="essential-reset" data-tab-id="${id}"${canReset ? "" : " disabled"}>${icon("restore")}<span>Reset to saved page</span></button>
+    <button class="menu-item" type="button" role="menuitem" data-action="essential-unload" data-tab-id="${id}"${canUnload ? "" : " disabled"}>${icon("moon")}<span>Unload</span></button>
+    <div class="menu-separator"></div>
+    <button class="menu-item danger" type="button" role="menuitem" data-action="essential-remove" data-tab-id="${id}">${icon("close")}<span>Remove from Essentials</span></button>`);
+  const anchorRect = anchor?.getBoundingClientRect?.() || {
+    left: point?.x || 8,
+    right: point?.x || 8,
+    top: point?.y || 8,
+    bottom: point?.y || 8,
+  };
+  positionPopover(popover, anchorRect);
+  presentPopover(popover);
+  menuPopoverKeydown(popover, anchor);
 }
 
 function pinnedTabMarkup(tab) {
@@ -399,8 +456,54 @@ function bookmarkFavicon(bookmark) {
   }
 }
 
+function bookmarkTitle(bookmark) {
+  return bookmark.title || (() => {
+    try { return new URL(bookmark.url).hostname; } catch { return "Bookmark"; }
+  })();
+}
+
+function bookmarkItemMarkup(bookmark, { folderId = null } = {}) {
+  const title = bookmarkTitle(bookmark);
+  const displayBookmark = {
+    url: bookmark.url,
+    favicon: bookmarkFavicon(bookmark),
+  };
+  const id = escapeHtml(bookmark.id);
+  return `<div class="bookmark-item" data-bookmark-id="${id}">
+    <button class="bookmark-open" type="button" data-action="open-bookmark" data-url="${escapeHtml(bookmark.url)}" title="${escapeHtml(title)}">
+      ${faviconMarkup(displayBookmark)}
+      <span class="bookmark-title">${escapeHtml(title)}</span>
+    </button>
+    <button class="bookmark-menu-button" type="button" data-action="bookmark-menu" data-bookmark-id="${id}" data-folder-id="${folderId ? escapeHtml(folderId) : ""}" title="Bookmark actions" aria-label="${escapeHtml(title)} actions" aria-haspopup="menu">${icon("tools")}</button>
+    <button class="bookmark-remove" type="button" data-action="remove-bookmark" data-bookmark-id="${id}" title="Remove bookmark" aria-label="Remove ${escapeHtml(title)}">${icon("trash")}</button>
+  </div>`;
+}
+
+function bookmarkFolderMarkup(folder, members, childrenMarkup = "") {
+  const name = escapeHtml(folder.name);
+  const folderId = escapeHtml(folder.id);
+  const body = members
+    .map(member => bookmarkItemMarkup(member, { folderId: folder.id }))
+    .join("") + childrenMarkup;
+  return `<section class="bookmark-folder${folder.expanded ? " is-expanded" : ""}" data-bookmark-folder-id="${folderId}">
+    <div class="bookmark-folder-heading">
+      <button class="bookmark-folder-header" type="button" data-action="toggle-bookmark-folder" data-folder-id="${folderId}" aria-expanded="${folder.expanded ? "true" : "false"}">
+        <span class="bookmark-folder-disclosure">${icon("chevron")}</span>
+        <span class="bookmark-folder-glyph">${icon("folder")}</span>
+        <span class="bookmark-folder-name">${name}</span>
+        <span class="bookmark-folder-count">${members.length}</span>
+      </button>
+      <button class="bookmark-folder-menu-button" type="button" data-action="bookmark-folder-menu" data-folder-id="${folderId}" title="Folder actions" aria-label="${name} folder actions" aria-haspopup="menu">${icon("tools")}</button>
+    </div>
+    <div class="bookmark-folder-items">${
+      body || '<p class="bookmark-folder-empty">No bookmarks in this folder</p>'
+    }</div>
+  </section>`;
+}
+
 function renderBookmarks() {
   const bookmarks = Array.isArray(state.bookmarks) ? state.bookmarks : [];
+  const bookmarkFolders = Array.isArray(state.bookmarkFolders) ? state.bookmarkFolders : [];
   bookmarksSection.classList.toggle("is-collapsed", !bookmarksExpanded);
   bookmarksToggle.setAttribute("aria-expanded", bookmarksExpanded ? "true" : "false");
   replaceTrustedMarkup(
@@ -408,29 +511,226 @@ function renderBookmarks() {
     `<span class="bookmarks-chevron">${icon("chevron")}</span><span class="bookmarks-heading-icon">${icon("star")}</span><span class="bookmarks-heading">Bookmarks</span><span class="bookmarks-count">${bookmarks.length}</span>`
   );
   bookmarksList.hidden = !bookmarksExpanded;
+  bookmarkSearchInput.hidden = !bookmarksExpanded || !bookmarks.length;
   if (!bookmarksExpanded) return;
   if (!bookmarks.length) {
     replaceTrustedMarkup(bookmarksList, '<p class="bookmarks-empty">No bookmarks yet</p>');
     return;
   }
+  const searchQuery = bookmarkSearchQuery.trim().toLowerCase();
+  if (searchQuery) {
+    // Search flattens the tree: every match is shown as a plain row no
+    // matter which folder owns it, so filing never hides a result.
+    const matches = bookmarks.filter(bookmark =>
+      bookmarkTitle(bookmark).toLowerCase().includes(searchQuery) ||
+      bookmark.url?.toLowerCase().includes(searchQuery)
+    );
+    replaceTrustedMarkup(
+      bookmarksList,
+      matches.map(bookmark => bookmarkItemMarkup(bookmark)).join("") ||
+        '<p class="bookmarks-empty">No matching bookmarks</p>'
+    );
+    return;
+  }
+  const bookmarksById = new Map(bookmarks.map(bookmark => [bookmark.id, bookmark]));
+  const grouped = new Set();
+  const renderFolderTree = (parentId, seen) => bookmarkFolders
+    .filter(folder => (folder.parentId || "") === parentId && !seen.has(folder.id))
+    .map(folder => {
+      seen.add(folder.id);
+      const members = folder.bookmarkIds
+        .map(id => bookmarksById.get(id))
+        .filter(Boolean);
+      for (const member of members) grouped.add(member.id);
+      return bookmarkFolderMarkup(folder, members, renderFolderTree(folder.id, seen));
+    })
+    .join("");
+  const folderMarkup = renderFolderTree("", new Set());
+  const ungroupedMarkup = bookmarks
+    .filter(bookmark => !grouped.has(bookmark.id))
+    .map(bookmark => bookmarkItemMarkup(bookmark))
+    .join("");
+  replaceTrustedMarkup(bookmarksList, folderMarkup + ungroupedMarkup);
+}
+
+function liveFolderMarkup(folder) {
+  const name = escapeHtml(folder.name);
+  const folderId = escapeHtml(folder.id);
+  const itemsMarkup = folder.items.map(item => {
+    const title = escapeHtml(item.title || item.url);
+    return `<div class="live-folder-item">
+      <button class="live-folder-open" type="button" data-action="open-bookmark" data-url="${escapeHtml(item.url)}" title="${title}">
+        <span class="live-folder-item-glyph">${icon("globe")}</span>
+        <span class="live-folder-item-title">${title}</span>
+      </button>
+    </div>`;
+  }).join("");
+  return `<section class="live-folder${folder.expanded ? " is-expanded" : ""}${folder.status === "error" ? " is-errored" : ""}" data-live-folder-id="${folderId}">
+    <div class="bookmark-folder-heading">
+      <button class="bookmark-folder-header" type="button" data-action="toggle-live-folder" data-folder-id="${folderId}" aria-expanded="${folder.expanded ? "true" : "false"}">
+        <span class="bookmark-folder-disclosure">${icon("chevron")}</span>
+        <span class="bookmark-folder-glyph">${icon("rss")}</span>
+        <span class="bookmark-folder-name">${name}</span>
+        <span class="bookmark-folder-count">${folder.items.length}</span>
+      </button>
+      <button class="bookmark-folder-menu-button" type="button" data-action="live-folder-menu" data-folder-id="${folderId}" title="Live folder actions" aria-label="${name} live folder actions" aria-haspopup="menu">${icon("tools")}</button>
+    </div>
+    <div class="bookmark-folder-items">${
+      folder.items.length
+        ? itemsMarkup
+        : `<p class="bookmark-folder-empty">${
+            folder.status === "error"
+              ? "The feed could not be loaded"
+              : "No items from this feed yet"
+          }</p>`
+    }</div>
+  </section>`;
+}
+
+function safeExtensionIcon(value) {
+  return typeof value === "string" &&
+    /^data:image\/(png|jpeg|gif|webp);base64,/i.test(value)
+    ? value
+    : "";
+}
+
+function closeAuthPrompt() {
+  authPromptRequestId = null;
+  authPromptUsername.value = "";
+  authPromptPassword.value = "";
+  if (authPrompt.open) authPrompt.close();
+  api.setChromeModalOpen(false);
+}
+
+function renderAuthPrompt() {
+  const pending = state.pendingAuth;
+  if (!pending) {
+    if (authPrompt.open) closeAuthPrompt();
+    return;
+  }
+  if (authPrompt.open) {
+    if (authPromptRequestId !== pending.id) {
+      // A newer challenge replaced the one on screen; restart the form.
+      authPromptRequestId = pending.id;
+      authPromptUsername.value = "";
+      authPromptPassword.value = "";
+    }
+    return;
+  }
+  if (textPrompt.open || historyClearDialog.open) return;
+  authPromptRequestId = pending.id;
+  const target = `${pending.host || "this server"}${pending.realm ? ` — “${pending.realm}”` : ""}`;
+  authPromptDescription.textContent = pending.isProxy
+    ? `The proxy ${target} requires a username and password.`
+    : `${target} requires a username and password. Chroma will not store them.`;
+  authPromptUsername.value = "";
+  authPromptPassword.value = "";
+  api.setChromeModalOpen(true);
+  authPrompt.showModal();
+  requestAnimationFrame(() => authPromptUsername.focus());
+}
+
+authPromptForm.addEventListener("submit", event => {
+  event.preventDefault();
+  if (!authPromptRequestId) return;
+  const id = authPromptRequestId;
+  const username = authPromptUsername.value.slice(0, 500);
+  const password = authPromptPassword.value.slice(0, 500);
+  closeAuthPrompt();
+  void runCommand(commands.submitAuthCredentials, { id, username, password });
+});
+
+authPromptCancel.addEventListener("click", event => {
+  event.preventDefault();
+  const id = authPromptRequestId;
+  closeAuthPrompt();
+  if (id) void runCommand(commands.cancelAuthRequest, { id });
+});
+
+authPrompt.addEventListener("cancel", event => {
+  event.preventDefault();
+  const id = authPromptRequestId;
+  closeAuthPrompt();
+  if (id) void runCommand(commands.cancelAuthRequest, { id });
+});
+
+function renderNowPlayingButton() {
+  const mediaTabIds = Array.isArray(state.mediaTabIds) ? state.mediaTabIds : [];
+  const anyAudible = state.tabs.some(tab => tab.audible);
+  nowPlayingButton.hidden = !mediaTabIds.length && !anyAudible;
+  nowPlayingButton.classList.toggle("is-audible", anyAudible);
+}
+
+async function showNowPlayingMenu(anchor = null) {
+  const openMenu = popoverLayer.querySelector('[data-popover-kind="now-playing"]');
+  if (openMenu) {
+    closePopover();
+    anchor?.focus({ preventScroll: true });
+    return;
+  }
+  const entries = await runCommand(commands.queryNowPlaying, {});
+  closePopover();
+  const rows = (Array.isArray(entries) ? entries : []).map(entry => {
+    const tab = state.tabs.find(item => item.id === entry.tabId);
+    if (!tab) return "";
+    const id = escapeHtml(entry.tabId);
+    const title = escapeHtml(entry.title || tab.title || "Media");
+    const artist = escapeHtml(entry.artist || "");
+    const artworkUrl = typeof entry.artworkUrl === "string" &&
+      /^(https?:|data:image\/(png|jpeg|gif|webp);base64,)/i.test(entry.artworkUrl)
+      ? entry.artworkUrl
+      : "";
+    const artwork = artworkUrl
+      ? `<img class="now-playing-art" src="${escapeHtml(artworkUrl)}" alt="" />`
+      : `<span class="now-playing-art now-playing-art-fallback">${icon("volume")}</span>`;
+    return `<div class="container-row">
+      <button class="menu-item extension-row-label" type="button" role="menuitem" data-action="select-tab" data-tab-id="${id}" title="Go to ${title}">
+        ${artwork}<span>${title}</span>${artist ? `<span class="extension-version">${artist}</span>` : ""}
+      </button>
+      <button class="container-row-action" type="button" role="menuitem" data-action="now-playing-toggle" data-tab-id="${id}" title="${entry.playing ? "Pause" : "Play"}" aria-label="${entry.playing ? "Pause" : "Play"} ${title}">${icon(entry.playing ? "pause" : "play")}</button>
+      <button class="container-row-action" type="button" role="menuitem" data-action="toggle-mute" data-tab-id="${id}" title="${tab.muted ? "Unmute" : "Mute"}" aria-label="${tab.muted ? "Unmute" : "Mute"} ${title}">${icon(tab.muted ? "muted" : "volume")}</button>
+    </div>`;
+  }).join("");
+  const popover = document.createElement("div");
+  popover.className = "popover folder-popover containers-popover";
+  popover.dataset.popoverKind = "now-playing";
+  popover.setAttribute("role", "menu");
+  popover.setAttribute("aria-label", "Now playing");
+  replaceTrustedMarkup(popover, `<div class="popover-title">Now Playing</div>
+    ${rows || '<p class="containers-empty">Nothing is playing right now.</p>'}`);
+  const anchorRect = anchor?.getBoundingClientRect?.() || {
+    left: 8, right: 8, top: 8, bottom: 8,
+  };
+  positionPopover(popover, anchorRect);
+  presentPopover(popover);
+  anchor?.setAttribute("aria-expanded", "true");
+  menuPopoverKeydown(popover, anchor);
+}
+
+function renderExtensionActions() {
+  const extensions = Array.isArray(state.extensions) ? state.extensions : [];
+  const actionable = extensions.filter(extension => extension.popupPath);
+  const openId = state.extensionPopup?.open ? state.extensionPopup.extensionId : "";
   replaceTrustedMarkup(
-    bookmarksList,
-    bookmarks.map(bookmark => {
-      const title = bookmark.title || (() => {
-        try { return new URL(bookmark.url).hostname; } catch { return "Bookmark"; }
-      })();
-      const displayBookmark = {
-        url: bookmark.url,
-        favicon: bookmarkFavicon(bookmark),
-      };
-      return `<div class="bookmark-item" data-bookmark-id="${escapeHtml(bookmark.id)}">
-        <button class="bookmark-open" type="button" data-action="open-bookmark" data-url="${escapeHtml(bookmark.url)}" title="${escapeHtml(title)}">
-          ${faviconMarkup(displayBookmark)}
-          <span class="bookmark-title">${escapeHtml(title)}</span>
-        </button>
-        <button class="bookmark-remove" type="button" data-action="remove-bookmark" data-bookmark-id="${escapeHtml(bookmark.id)}" title="Remove bookmark" aria-label="Remove ${escapeHtml(title)}">${icon("trash")}</button>
-      </div>`;
+    extensionActions,
+    actionable.map(extension => {
+      const id = escapeHtml(extension.id);
+      const title = escapeHtml(extension.actionTitle || extension.name);
+      const iconUrl = safeExtensionIcon(extension.iconDataUrl);
+      const glyph = iconUrl
+        ? `<img class="extension-action-icon" src="${escapeHtml(iconUrl)}" alt="" />`
+        : `<span class="extension-action-fallback">${escapeHtml((extension.name || "?").charAt(0))}</span>`;
+      return `<button class="extension-action-button${extension.id === openId ? " is-open" : ""}" type="button" data-action="extension-open-popup" data-extension-id="${id}" title="${title}" aria-label="${title}" aria-pressed="${extension.id === openId}">${glyph}</button>`;
     }).join("")
+  );
+}
+
+function renderLiveFolders() {
+  const liveFolders = Array.isArray(state.liveFolders) ? state.liveFolders : [];
+  liveFoldersSection.classList.toggle("is-empty", !liveFolders.length);
+  replaceTrustedMarkup(
+    liveFoldersList,
+    liveFolders.map(folder => liveFolderMarkup(folder)).join("")
   );
 }
 
@@ -812,18 +1112,27 @@ async function clearHistory(payload) {
   }
 }
 
+function containerForTab(tab) {
+  if (!tab?.containerId || !Array.isArray(state.containers)) return null;
+  return state.containers.find(container => container.id === tab.containerId) || null;
+}
+
 function tabMarkup(tab, rowStyle = "") {
   const split = splitForTab(tab.id);
+  const container = containerForTab(tab);
+  const containerDot = container
+    ? `<span class="tab-container-dot" style="background:${escapeHtml(container.color)}" title="Container: ${escapeHtml(container.name)}"></span>`
+    : "";
   const status = tab.audible || tab.muted
     ? `<button class="tab-status" data-action="toggle-mute" data-tab-id="${escapeHtml(tab.id)}" title="${tab.muted ? "Unmute" : "Mute"}">${icon(tab.muted ? "muted" : "volume")}</button>`
     : tab.crashed
       ? `<span class="tab-status" title="Tab crashed">!</span>`
       : "";
   return `<div class="tab-row" data-tab-id="${escapeHtml(tab.id)}"${rowStyle ? ` style="${rowStyle}"` : ""}>
-    <div class="tab-item${tab.id === state.activeTabId ? " is-active" : ""}${split ? " is-split" : ""}" data-action="select-tab" data-tab-id="${escapeHtml(tab.id)}" role="tab" aria-selected="${tab.id === state.activeTabId}" tabindex="0">
+    <div class="tab-item${tab.id === state.activeTabId ? " is-active" : ""}${split ? " is-split" : ""}${tab.discarded ? " is-discarded" : ""}" data-action="select-tab" data-tab-id="${escapeHtml(tab.id)}" role="tab" aria-selected="${tab.id === state.activeTabId}" tabindex="0">
       ${faviconMarkup(tab)}
       <span class="tab-copy">${escapeHtml(tab.title || "New Tab")}</span>
-      <span class="tab-indicators">${status}<button class="tab-close" data-action="close-tab" data-tab-id="${escapeHtml(tab.id)}" title="Close tab">${icon("close")}</button></span>
+      <span class="tab-indicators">${containerDot}${status}<button class="tab-close" data-action="close-tab" data-tab-id="${escapeHtml(tab.id)}" title="Close tab">${icon("close")}</button></span>
     </div>
   </div>`;
 }
@@ -1008,6 +1317,7 @@ function commandPaletteContext() {
     canReload: Boolean(tab),
     canBookmark: /^https?:\/\//i.test(tab?.url || ""),
     canSplit: Boolean(tab && !tab.essential && (!split || split.tabIds.length < 4)),
+    inSplit: Boolean(split),
     historyAvailable: true,
     downloadsAvailable: true,
     developerToolsAllowed: Boolean(tab),
@@ -1133,6 +1443,20 @@ async function executeCommandPaletteItem(index = commandPaletteIndex) {
       return runCommand(commands.toggleSidebar);
     case "split:active":
       return runCommand(commands.splitActive, { direction: "row" });
+    case "split:set-preset":
+      return runCommand(commands.setSplitPreset, { ...item.payload });
+    case "media:toggle-playback": {
+      if (!tab) return false;
+      const playback = await runCommand(commands.toggleMediaPlayback, { id: tab.id });
+      if (playback === null) showToast("No playable media on this page.");
+      return playback !== null;
+    }
+    case "media:toggle-pip": {
+      if (!tab) return false;
+      const pip = await runCommand(commands.togglePictureInPicture, { id: tab.id });
+      if (pip === null) showToast("No video is eligible for Picture-in-Picture.");
+      return pip !== null;
+    }
     case "history:open":
       openHistoryPanel();
       return true;
@@ -1150,10 +1474,17 @@ async function executeCommandPaletteItem(index = commandPaletteIndex) {
   }
 }
 
-function requestText({ title, label, value = "", submitLabel = "Save", maxLength = 80 }) {
+function requestText({
+  title,
+  label,
+  value = "",
+  submitLabel = "Save",
+  maxLength = 80,
+  allowEmpty = false,
+}) {
   if (textPrompt.open) return Promise.resolve(null);
   const boundedMaxLength = Number.isInteger(maxLength)
-    ? Math.max(1, Math.min(80, maxLength))
+    ? Math.max(1, Math.min(512, maxLength))
     : 80;
   textPromptTitle.textContent = title;
   textPromptDescription.textContent = "";
@@ -1162,7 +1493,7 @@ function requestText({ title, label, value = "", submitLabel = "Save", maxLength
   textPromptLabel.textContent = label;
   textPromptLabel.hidden = false;
   textPromptInput.hidden = false;
-  textPromptInput.required = true;
+  textPromptInput.required = !allowEmpty;
   textPromptInput.maxLength = boundedMaxLength;
   textPromptInput.value = String(value).slice(0, boundedMaxLength);
   textPromptSubmit.textContent = submitLabel;
@@ -1183,7 +1514,7 @@ function requestText({ title, label, value = "", submitLabel = "Save", maxLength
     const onSubmit = event => {
       event.preventDefault();
       const result = textPromptInput.value.trim().slice(0, boundedMaxLength);
-      if (result) finish(result);
+      if (result || allowEmpty) finish(result);
     };
     const onCancel = event => {
       event.preventDefault();
@@ -1507,7 +1838,10 @@ function showFolderMenu(folderId, anchor = null, point = null) {
   positionPopover(popover, anchorRect);
   presentPopover(popover);
   anchor?.setAttribute("aria-expanded", "true");
+  menuPopoverKeydown(popover, anchor);
+}
 
+function menuPopoverKeydown(popover, anchor) {
   popover.addEventListener("keydown", event => {
     const items = [...popover.querySelectorAll('[role="menuitem"]')];
     const currentIndex = items.indexOf(document.activeElement);
@@ -1529,6 +1863,326 @@ function showFolderMenu(folderId, anchor = null, point = null) {
     items[nextIndex]?.focus();
   });
   requestAnimationFrame(() => popover.querySelector('[role="menuitem"]')?.focus());
+}
+
+function showBookmarkFolderMenu(folderId, anchor = null, point = null) {
+  const folder = state.bookmarkFolders?.find(item => item.id === folderId);
+  if (!folder) return;
+  const openMenu = popoverLayer.querySelector(
+    `[data-popover-kind="bookmark-folder"][data-folder-id="${CSS.escape(folder.id)}"]`
+  );
+  if (openMenu) {
+    closePopover();
+    anchor?.focus({ preventScroll: true });
+    return;
+  }
+
+  closePopover();
+  const id = escapeHtml(folder.id);
+  const name = escapeHtml(folder.name);
+  const popover = document.createElement("div");
+  popover.className = "popover folder-popover";
+  popover.dataset.popoverKind = "bookmark-folder";
+  popover.dataset.folderId = folder.id;
+  popover.setAttribute("role", "menu");
+  popover.setAttribute("aria-label", `${folder.name} folder actions`);
+  const descendantIds = (() => {
+    const collected = new Set([folder.id]);
+    let added = true;
+    while (added) {
+      added = false;
+      for (const candidate of state.bookmarkFolders) {
+        if (!collected.has(candidate.id) && collected.has(candidate.parentId || "-")) {
+          collected.add(candidate.id);
+          added = true;
+        }
+      }
+    }
+    return collected;
+  })();
+  const moveTargets = state.bookmarkFolders
+    .filter(candidate => !descendantIds.has(candidate.id))
+    .map(candidate => `<button class="menu-item" type="button" role="menuitem" data-action="bookmark-folder-move" data-folder-id="${id}" data-parent-id="${escapeHtml(candidate.id)}">${icon("folder")}<span>Move into “${escapeHtml(candidate.name)}”</span></button>`)
+    .join("");
+  const moveToTop = folder.parentId
+    ? `<button class="menu-item" type="button" role="menuitem" data-action="bookmark-folder-move" data-folder-id="${id}" data-parent-id="">${icon("close")}<span>Move to top level</span></button>`
+    : "";
+  replaceTrustedMarkup(popover, `<div class="popover-title">${name}</div>
+    <button class="menu-item" type="button" role="menuitem" data-action="bookmark-folder-menu-toggle" data-folder-id="${id}">${icon("chevron")}<span>${folder.expanded ? "Collapse folder" : "Expand folder"}</span></button>
+    <button class="menu-item" type="button" role="menuitem" data-action="bookmark-folder-rename" data-folder-id="${id}">${icon("tools")}<span>Rename folder</span></button>
+    <button class="menu-item" type="button" role="menuitem" data-action="bookmark-folder-new-subfolder" data-folder-id="${id}">${icon("plus")}<span>New subfolder…</span></button>
+    ${moveTargets || moveToTop ? '<div class="menu-separator"></div>' : ""}
+    ${moveToTop}${moveTargets}
+    <div class="menu-separator"></div>
+    <button class="menu-item danger" type="button" role="menuitem" data-action="bookmark-folder-delete" data-folder-id="${id}" aria-label="Delete ${name} folder">${icon("trash")}<span>Delete folder</span></button>`);
+  const anchorRect = anchor?.getBoundingClientRect?.() || {
+    left: point?.x || 8,
+    right: point?.x || 8,
+    top: point?.y || 8,
+    bottom: point?.y || 8,
+  };
+  positionPopover(popover, anchorRect);
+  presentPopover(popover);
+  anchor?.setAttribute("aria-expanded", "true");
+  menuPopoverKeydown(popover, anchor);
+}
+
+function showBookmarksMenu(anchor = null) {
+  const openMenu = popoverLayer.querySelector('[data-popover-kind="bookmarks-io"]');
+  if (openMenu) {
+    closePopover();
+    anchor?.focus({ preventScroll: true });
+    return;
+  }
+  closePopover();
+  const popover = document.createElement("div");
+  popover.className = "popover folder-popover";
+  popover.dataset.popoverKind = "bookmarks-io";
+  popover.setAttribute("role", "menu");
+  popover.setAttribute("aria-label", "Bookmark import and export");
+  replaceTrustedMarkup(popover, `<div class="popover-title">Bookmarks</div>
+    <button class="menu-item" type="button" role="menuitem" data-action="bookmarks-import">${icon("download")}<span>Import bookmarks (HTML)…</span></button>
+    <button class="menu-item" type="button" role="menuitem" data-action="bookmarks-export">${icon("star")}<span>Export bookmarks (HTML)…</span></button>`);
+  const anchorRect = anchor?.getBoundingClientRect?.() || {
+    left: 8,
+    right: 8,
+    top: 8,
+    bottom: 8,
+  };
+  positionPopover(popover, anchorRect);
+  presentPopover(popover);
+  anchor?.setAttribute("aria-expanded", "true");
+  menuPopoverKeydown(popover, anchor);
+}
+
+function showLiveFolderMenu(folderId, anchor = null, point = null) {
+  const folder = state.liveFolders?.find(item => item.id === folderId);
+  if (!folder) return;
+  const openMenu = popoverLayer.querySelector(
+    `[data-popover-kind="live-folder"][data-folder-id="${CSS.escape(folder.id)}"]`
+  );
+  if (openMenu) {
+    closePopover();
+    anchor?.focus({ preventScroll: true });
+    return;
+  }
+
+  closePopover();
+  const id = escapeHtml(folder.id);
+  const name = escapeHtml(folder.name);
+  const popover = document.createElement("div");
+  popover.className = "popover folder-popover";
+  popover.dataset.popoverKind = "live-folder";
+  popover.dataset.folderId = folder.id;
+  popover.setAttribute("role", "menu");
+  popover.setAttribute("aria-label", `${folder.name} live folder actions`);
+  replaceTrustedMarkup(popover, `<div class="popover-title">${name}</div>
+    <button class="menu-item" type="button" role="menuitem" data-action="live-folder-refresh" data-folder-id="${id}">${icon("reload")}<span>Refresh now</span></button>
+    <button class="menu-item" type="button" role="menuitem" data-action="live-folder-menu-toggle" data-folder-id="${id}">${icon("chevron")}<span>${folder.expanded ? "Collapse folder" : "Expand folder"}</span></button>
+    <button class="menu-item" type="button" role="menuitem" data-action="live-folder-rename" data-folder-id="${id}">${icon("tools")}<span>Rename folder</span></button>
+    <div class="menu-separator"></div>
+    <button class="menu-item danger" type="button" role="menuitem" data-action="live-folder-delete" data-folder-id="${id}" aria-label="Delete ${name} live folder">${icon("trash")}<span>Delete live folder</span></button>`);
+  const anchorRect = anchor?.getBoundingClientRect?.() || {
+    left: point?.x || 8,
+    right: point?.x || 8,
+    top: point?.y || 8,
+    bottom: point?.y || 8,
+  };
+  positionPopover(popover, anchorRect);
+  presentPopover(popover);
+  anchor?.setAttribute("aria-expanded", "true");
+  menuPopoverKeydown(popover, anchor);
+}
+
+function showSiteInfo(anchor = null) {
+  const openMenu = popoverLayer.querySelector('[data-popover-kind="site-info"]');
+  if (openMenu) {
+    closePopover();
+    anchor?.focus({ preventScroll: true });
+    return;
+  }
+  const tab = activeTab();
+  if (!tab) return;
+  closePopover();
+  let host = "";
+  let scheme = "";
+  try {
+    const url = new URL(tab.url);
+    host = url.hostname;
+    scheme = url.protocol;
+  } catch {
+    // Fall through to the internal-page presentation.
+  }
+  const isHttps = scheme === "https:";
+  const isHttp = scheme === "http:";
+  const isInternal = scheme === "chroma:";
+  const container = containerForTab(tab);
+  const securityLine = isHttps
+    ? "Your connection to this site is encrypted (HTTPS)."
+    : isHttp
+      ? "Your connection to this site is not encrypted. Avoid entering sensitive information."
+      : isInternal
+        ? "This is a built-in Chroma page."
+        : "This page has no web connection information.";
+  const popover = document.createElement("div");
+  popover.className = "popover folder-popover site-info-popover";
+  popover.dataset.popoverKind = "site-info";
+  popover.setAttribute("role", "menu");
+  popover.setAttribute("aria-label", "Site information");
+  const securityClass = isHttps ? "is-secure" : isHttp ? "is-insecure" : "is-neutral";
+  replaceTrustedMarkup(popover, `<div class="popover-title">${escapeHtml(host || (isInternal ? "Chroma" : "This page"))}</div>
+    <p class="site-info-security ${securityClass}">${escapeHtml(securityLine)}</p>
+    ${container ? `<p class="site-info-line"><span class="container-color-dot" style="--container-color:${escapeHtml(container.color)}"></span>Open in the “${escapeHtml(container.name)}” container</p>` : ""}
+    <p class="site-info-line">Permissions are asked for on demand and never remembered.</p>
+    <div class="menu-separator"></div>
+    <button class="menu-item" type="button" role="menuitem" data-action="site-copy-url">${icon("globe")}<span>Copy address</span></button>
+    ${isHttps || isHttp ? `<button class="menu-item danger" type="button" role="menuitem" data-action="site-clear-data" data-tab-id="${escapeHtml(tab.id)}">${icon("trash")}<span>Clear data for this site…</span></button>` : ""}`);
+  const anchorRect = anchor?.getBoundingClientRect?.() || {
+    left: 8, right: 8, top: 8, bottom: 8,
+  };
+  positionPopover(popover, anchorRect);
+  presentPopover(popover);
+  anchor?.setAttribute("aria-expanded", "true");
+  menuPopoverKeydown(popover, anchor);
+}
+
+function showContainersMenu(anchor = null) {
+  const openMenu = popoverLayer.querySelector('[data-popover-kind="containers"]');
+  if (openMenu) {
+    closePopover();
+    anchor?.focus({ preventScroll: true });
+    return;
+  }
+
+  closePopover();
+  const containers = Array.isArray(state.containers) ? state.containers : [];
+  const popover = document.createElement("div");
+  popover.className = "popover folder-popover containers-popover";
+  popover.dataset.popoverKind = "containers";
+  popover.setAttribute("role", "menu");
+  popover.setAttribute("aria-label", "Containers");
+  const rows = containers.map(container => {
+    const id = escapeHtml(container.id);
+    const name = escapeHtml(container.name);
+    const proxyBadge = container.proxy
+      ? `<span class="container-proxy-badge" title="Proxy: ${escapeHtml(container.proxy)}">proxy</span>`
+      : "";
+    const uaBadge = container.userAgent
+      ? `<span class="container-proxy-badge" title="User agent: ${escapeHtml(container.userAgent)}">ua</span>`
+      : "";
+    return `<div class="container-row">
+      <button class="menu-item container-open" type="button" role="menuitem" data-action="container-new-tab" data-container-id="${id}" title="New tab in ${name}">
+        <span class="container-color-dot" style="background:${escapeHtml(container.color)}"></span><span>${name}</span>${proxyBadge}${uaBadge}
+      </button>
+      <button class="container-row-action" type="button" role="menuitem" data-action="container-proxy" data-container-id="${id}" title="Set proxy for ${name}" aria-label="Set proxy for ${name}">${icon("globe")}</button>
+      <button class="container-row-action" type="button" role="menuitem" data-action="container-ua" data-container-id="${id}" title="Set user agent for ${name}" aria-label="Set user agent for ${name}">${icon("device")}</button>
+      <button class="container-row-action" type="button" role="menuitem" data-action="container-rename" data-container-id="${id}" title="Rename ${name}" aria-label="Rename ${name}">${icon("tools")}</button>
+      <button class="container-row-action" type="button" role="menuitem" data-action="container-delete" data-container-id="${id}" title="Delete ${name}" aria-label="Delete ${name}">${icon("trash")}</button>
+    </div>`;
+  }).join("");
+  replaceTrustedMarkup(popover, `<div class="popover-title">Containers</div>
+    ${rows || '<p class="containers-empty">No containers yet. Tabs in a container keep separate cookies and site data.</p>'}
+    <div class="menu-separator"></div>
+    <button class="menu-item" type="button" role="menuitem" data-action="container-create">${icon("plus")}<span>New container…</span></button>`);
+  const anchorRect = anchor?.getBoundingClientRect?.() || {
+    left: 8, right: 8, top: 8, bottom: 8,
+  };
+  positionPopover(popover, anchorRect);
+  presentPopover(popover);
+  anchor?.setAttribute("aria-expanded", "true");
+  menuPopoverKeydown(popover, anchor);
+}
+
+function showExtensionsMenu(anchor = null) {
+  const openMenu = popoverLayer.querySelector('[data-popover-kind="extensions"]');
+  if (openMenu) {
+    closePopover();
+    anchor?.focus({ preventScroll: true });
+    return;
+  }
+
+  closePopover();
+  const extensions = Array.isArray(state.extensions) ? state.extensions : [];
+  const popover = document.createElement("div");
+  popover.className = "popover folder-popover containers-popover";
+  popover.dataset.popoverKind = "extensions";
+  popover.setAttribute("role", "menu");
+  popover.setAttribute("aria-label", "Extensions");
+  const rows = extensions.map(extension => {
+    const id = escapeHtml(extension.id);
+    const name = escapeHtml(extension.name);
+    const version = escapeHtml(extension.version);
+    const actionTitle = escapeHtml(extension.actionTitle || name);
+    const label = extension.popupPath
+      ? `<button class="menu-item extension-row-label" type="button" role="menuitem" data-action="extension-open-popup" data-extension-id="${id}" title="Open ${actionTitle}">
+          <span>${name}</span><span class="extension-version">${version}</span>
+        </button>`
+      : `<div class="menu-item extension-row-label" role="menuitem" tabindex="0" title="${name} ${version}">
+          <span>${name}</span><span class="extension-version">${version}</span>
+        </div>`;
+    return `<div class="container-row">
+      ${label}
+      <button class="container-row-action" type="button" role="menuitem" data-action="extension-reload" data-extension-id="${id}" title="Reload ${name}" aria-label="Reload ${name}">${icon("reload")}</button>
+      <button class="container-row-action" type="button" role="menuitem" data-action="extension-remove" data-extension-id="${id}" title="Remove ${name}" aria-label="Remove ${name}">${icon("trash")}</button>
+    </div>`;
+  }).join("");
+  replaceTrustedMarkup(popover, `<div class="popover-title">Extensions</div>
+    ${rows || '<p class="containers-empty">No extensions installed. Install an unpacked (unzipped) Chrome extension folder.</p>'}
+    <div class="menu-separator"></div>
+    <button class="menu-item" type="button" role="menuitem" data-action="extension-install">${icon("plus")}<span>Install unpacked extension…</span></button>`);
+  const anchorRect = anchor?.getBoundingClientRect?.() || {
+    left: 8, right: 8, top: 8, bottom: 8,
+  };
+  positionPopover(popover, anchorRect);
+  presentPopover(popover);
+  anchor?.setAttribute("aria-expanded", "true");
+  menuPopoverKeydown(popover, anchor);
+}
+
+function showBookmarkMenu(bookmarkId, currentFolderId, anchor = null, point = null) {
+  const bookmark = state.bookmarks?.find(item => item.id === bookmarkId);
+  if (!bookmark) return;
+  const openMenu = popoverLayer.querySelector(
+    `[data-popover-kind="bookmark"][data-bookmark-id="${CSS.escape(bookmark.id)}"]`
+  );
+  if (openMenu) {
+    closePopover();
+    anchor?.focus({ preventScroll: true });
+    return;
+  }
+
+  closePopover();
+  const id = escapeHtml(bookmark.id);
+  const title = escapeHtml(bookmarkTitle(bookmark));
+  const folders = Array.isArray(state.bookmarkFolders) ? state.bookmarkFolders : [];
+  const popover = document.createElement("div");
+  popover.className = "popover folder-popover";
+  popover.dataset.popoverKind = "bookmark";
+  popover.dataset.bookmarkId = bookmark.id;
+  popover.setAttribute("role", "menu");
+  popover.setAttribute("aria-label", `${title} actions`);
+  const folderItems = folders
+    .filter(folder => folder.id !== currentFolderId)
+    .map(folder => `<button class="menu-item" type="button" role="menuitem" data-action="bookmark-move-to-folder" data-bookmark-id="${id}" data-folder-id="${escapeHtml(folder.id)}">${icon("folder")}<span>Move to “${escapeHtml(folder.name)}”</span></button>`)
+    .join("");
+  const removeFromFolderItem = currentFolderId
+    ? `<button class="menu-item" type="button" role="menuitem" data-action="bookmark-move-to-folder" data-bookmark-id="${id}" data-folder-id="">${icon("close")}<span>Remove from folder</span></button>`
+    : "";
+  replaceTrustedMarkup(popover, `<div class="popover-title">${title}</div>
+    <button class="menu-item" type="button" role="menuitem" data-action="bookmark-rename" data-bookmark-id="${id}">${icon("tools")}<span>Rename…</span></button>
+    ${folderItems}
+    <button class="menu-item" type="button" role="menuitem" data-action="bookmark-move-to-new-folder" data-bookmark-id="${id}">${icon("plus")}<span>New folder…</span></button>
+    ${removeFromFolderItem ? `<div class="menu-separator"></div>${removeFromFolderItem}` : ""}`);
+  const anchorRect = anchor?.getBoundingClientRect?.() || {
+    left: point?.x || 8,
+    right: point?.x || 8,
+    top: point?.y || 8,
+    bottom: point?.y || 8,
+  };
+  positionPopover(popover, anchorRect);
+  presentPopover(popover);
+  anchor?.setAttribute("aria-expanded", "true");
+  menuPopoverKeydown(popover, anchor);
 }
 
 function showTabMenu(tabId, x, y) {
@@ -1554,12 +2208,48 @@ function showTabMenu(tabId, x, y) {
       ? `<button class="menu-item" data-action="context-unsplit">${icon("grid")}<span>Exit split view</span></button>`
       : `<button class="menu-item" data-action="context-split-row">${icon("split")}<span>Split side by side</span></button><button class="menu-item" data-action="context-split-column">${icon("splitColumn")}<span>Split top and bottom</span></button>`
     : "";
+  const containers = Array.isArray(state.containers) ? state.containers : [];
+  const containerActions = movable && !group
+    ? [
+        ...containers
+          .filter(container => container.id !== tab.containerId)
+          .map(container => `<button class="menu-item" data-action="context-reopen-container" data-container-id="${escapeHtml(container.id)}"><span class="container-color-dot" style="background:${escapeHtml(container.color)}"></span><span>Reopen in ${escapeHtml(container.name)}</span></button>`),
+        ...(tab.containerId
+          ? [`<button class="menu-item" data-action="context-reopen-container" data-container-id=""><span class="container-color-dot" style="background:var(--chroma-text-faint)"></span><span>Reopen outside containers</span></button>`]
+          : []),
+      ].join("")
+    : "";
+  const discardAction = !group && !tab.crashed && !tab.discarded && tab.id !== state.activeTabId
+    ? `<button class="menu-item" data-action="context-discard">${icon("moon")}<span>Unload tab</span></button>`
+    : "";
+  const uaMode = state.uaOverrides?.[tab.id] || "auto";
+  const uaAction = !tab.crashed && !tab.discarded && /^https?:\/\//i.test(tab.url)
+    ? `<button class="menu-item" data-action="context-ua-mode" data-ua-mode="${uaMode === "mobile" ? "auto" : "mobile"}">${icon("globe")}<span>${uaMode === "mobile" ? "Request desktop site" : "Request mobile site"}</span></button>`
+    : "";
   const popover = document.createElement("div");
   popover.className = "popover";
-  replaceTrustedMarkup(popover, `${pinAction}<button class="menu-item" data-action="context-essential">${icon("pin")}<span>${tab.essential ? "Remove from Essentials" : "Add to Essentials"}</span></button><button class="menu-item" data-action="context-mute">${icon(tab.muted ? "volume" : "muted")}<span>${tab.muted ? "Unmute tab" : "Mute tab"}</span></button>${folderAction}${workspaceActions ? `<div class="menu-separator"></div>${workspaceActions}` : ""}<div class="menu-separator"></div>${splitActions}<button class="menu-item" data-action="context-devtools">${icon("tools")}<span>Developer tools</span></button><div class="menu-separator"></div><button class="menu-item" data-action="context-close">${icon("close")}<span>Close tab</span></button>`);
+  replaceTrustedMarkup(popover, `${pinAction}<button class="menu-item" data-action="context-essential">${icon("pin")}<span>${tab.essential ? "Remove from Essentials" : "Add to Essentials"}</span></button><button class="menu-item" data-action="context-mute">${icon(tab.muted ? "volume" : "muted")}<span>${tab.muted ? "Unmute tab" : "Mute tab"}</span></button>${discardAction}${uaAction}${folderAction}${workspaceActions ? `<div class="menu-separator"></div>${workspaceActions}` : ""}${containerActions ? `<div class="menu-separator"></div>${containerActions}` : ""}<div class="menu-separator"></div>${splitActions}<button class="menu-item" data-action="context-devtools">${icon("tools")}<span>Developer tools</span></button><div class="menu-separator"></div><button class="menu-item" data-action="context-close">${icon("close")}<span>Close tab</span></button>`);
   const fakeRect = { left: x, right: x, top: y, bottom: y };
   positionPopover(popover, fakeRect);
   presentPopover(popover, tabId);
+}
+
+function bookmarkAddressSuggestions(query) {
+  if (!query || query.length < 2) return [];
+  const bookmarks = Array.isArray(state.bookmarks) ? state.bookmarks : [];
+  const needle = query.toLowerCase();
+  return bookmarks
+    .filter(bookmark =>
+      bookmark.title?.toLowerCase().includes(needle) ||
+      bookmark.url?.toLowerCase().includes(needle)
+    )
+    .slice(0, 3)
+    .map(bookmark => ({
+      type: "bookmark",
+      title: bookmarkTitle(bookmark),
+      url: bookmark.url,
+      value: bookmark.url,
+    }));
 }
 
 function renderAddressSuggestions() {
@@ -1568,12 +2258,23 @@ function renderAddressSuggestions() {
     return;
   }
   const query = addressInput.value.trim();
+  const bookmarkItems = bookmarkAddressSuggestions(query);
+  const bookmarkUrls = new Set(bookmarkItems.map(item => item.url));
+  const historyItems = suggestionHistoryItems.filter(
+    item => !bookmarkUrls.has(item.url)
+  );
   suggestionItems = query
-    ? [{ type: "search", title: `Search for “${query}”`, url: "Google Search", value: query }, ...suggestionHistoryItems]
+    ? [
+        { type: "search", title: `Search for “${query}”`, url: "Google Search", value: query },
+        ...bookmarkItems,
+        ...historyItems,
+      ]
     : suggestionHistoryItems;
   selectedSuggestion = Math.min(selectedSuggestion, suggestionItems.length - 1);
+  const iconForSuggestion = item =>
+    item.type === "bookmark" ? "star" : item.type === "history" ? "history" : "search";
   replaceTrustedMarkup(addressResults, suggestionItems
-    .map((item, index) => `<button class="address-result${index === selectedSuggestion ? " is-selected" : ""}" data-action="address-suggestion" data-index="${index}">${icon(item.type === "history" ? "history" : "search")}<span class="address-result-copy"><div class="address-result-title">${escapeHtml(item.title)}</div><div class="address-result-url">${escapeHtml(item.url)}</div></span></button>`)
+    .map((item, index) => `<button class="address-result${index === selectedSuggestion ? " is-selected" : ""}" data-action="address-suggestion" data-index="${index}">${icon(iconForSuggestion(item))}<span class="address-result-copy"><div class="address-result-title">${escapeHtml(item.title)}</div><div class="address-result-url">${escapeHtml(item.url)}</div></span></button>`)
     .join(""));
   addressResults.hidden = !suggestionItems.length;
 }
@@ -1923,6 +2624,450 @@ async function handleAction(action, element) {
     case "remove-bookmark":
       await runCommand(commands.removeBookmark, { id: element.dataset.bookmarkId });
       break;
+    case "new-bookmark-folder": {
+      const name = await requestText({
+        title: "New bookmark folder",
+        label: "Folder name",
+        value: "Folder",
+        submitLabel: "Create",
+        maxLength: 80,
+      });
+      if (name) await runCommand(commands.createBookmarkFolder, { name, bookmarkIds: [] });
+      break;
+    }
+    case "toggle-bookmark-folder":
+      await runCommand(commands.toggleBookmarkFolder, { id: element.dataset.folderId });
+      break;
+    case "bookmark-folder-menu":
+      showBookmarkFolderMenu(element.dataset.folderId, element);
+      break;
+    case "bookmark-folder-menu-toggle": {
+      const folderId = element.dataset.folderId;
+      closePopover();
+      await runCommand(commands.toggleBookmarkFolder, { id: folderId });
+      break;
+    }
+    case "bookmark-folder-rename": {
+      const folderId = element.dataset.folderId;
+      const folder = state.bookmarkFolders?.find(item => item.id === folderId);
+      closePopover({ keepModalOpen: Boolean(folder) });
+      if (!folder) break;
+      const name = await requestText({
+        title: "Rename bookmark folder",
+        label: "Folder name",
+        value: folder.name,
+        submitLabel: "Rename",
+        maxLength: 80,
+      });
+      if (name) {
+        await runCommand(commands.renameBookmarkFolder, {
+          id: folder.id,
+          name: name.trim().slice(0, 80),
+        });
+      }
+      break;
+    }
+    case "bookmark-folder-new-subfolder": {
+      const parentFolderId = element.dataset.folderId;
+      const parentFolder = state.bookmarkFolders?.find(item => item.id === parentFolderId);
+      closePopover({ keepModalOpen: Boolean(parentFolder) });
+      if (!parentFolder) break;
+      const name = await requestText({
+        title: `New folder inside “${parentFolder.name}”`,
+        label: "Folder name",
+        value: "Folder",
+        submitLabel: "Create",
+        maxLength: 80,
+      });
+      if (name) {
+        const created = await runCommand(commands.createBookmarkFolder, {
+          name,
+          bookmarkIds: [],
+          parentId: parentFolder.id,
+        });
+        if (created === null) showToast("The folder could not be created (nesting limit reached).");
+      }
+      break;
+    }
+    case "bookmark-folder-move": {
+      const folderId = element.dataset.folderId;
+      const parentId = element.dataset.parentId || "";
+      closePopover();
+      const moved = await runCommand(commands.moveBookmarkFolder, {
+        id: folderId,
+        parentId: parentId || null,
+      });
+      if (!moved) showToast("The folder cannot move there.");
+      break;
+    }
+    case "bookmark-folder-delete": {
+      const folderId = element.dataset.folderId;
+      const folder = state.bookmarkFolders?.find(item => item.id === folderId);
+      closePopover({ keepModalOpen: Boolean(folder) });
+      if (!folder) break;
+      const bookmarkLabel = `${folder.bookmarkIds.length} ${folder.bookmarkIds.length === 1 ? "bookmark" : "bookmarks"}`;
+      const confirmed = await requestConfirmation({
+        title: "Delete folder?",
+        message: `Deleting “${folder.name}” only removes the folder. Its ${bookmarkLabel} will stay saved and return to the ungrouped bookmark list.`,
+        confirmLabel: "Delete folder",
+      });
+      if (confirmed) await runCommand(commands.deleteBookmarkFolder, { id: folder.id });
+      break;
+    }
+    case "bookmark-menu":
+      showBookmarkMenu(
+        element.dataset.bookmarkId,
+        element.dataset.folderId || null,
+        element
+      );
+      break;
+    case "bookmark-move-to-folder": {
+      const bookmarkId = element.dataset.bookmarkId;
+      const folderId = element.dataset.folderId || null;
+      closePopover();
+      await runCommand(commands.moveBookmark, { id: bookmarkId, folderId });
+      break;
+    }
+    case "bookmarks-menu":
+      showBookmarksMenu(element);
+      break;
+    case "bookmarks-import": {
+      closePopover();
+      const result = await runCommand(commands.importBookmarks, {});
+      showToast(
+        result
+          ? `Imported ${result.imported} bookmark${result.imported === 1 ? "" : "s"}${result.skipped ? ` (${result.skipped} already saved)` : ""}.`
+          : "No bookmarks were imported."
+      );
+      break;
+    }
+    case "bookmarks-export": {
+      closePopover();
+      const result = await runCommand(commands.exportBookmarks, {});
+      showToast(
+        result
+          ? `Exported ${result.exported} bookmark${result.exported === 1 ? "" : "s"}.`
+          : "Bookmarks were not exported."
+      );
+      break;
+    }
+    case "new-live-folder": {
+      const url = await requestText({
+        title: "New live folder",
+        label: "Feed address (RSS or Atom)",
+        value: "https://",
+        submitLabel: "Create",
+        maxLength: 2000,
+      });
+      if (!url || !/^https?:\/\//i.test(url.trim())) {
+        if (url) showToast("Live folders need an http(s) feed address.");
+        break;
+      }
+      const created = await runCommand(commands.createLiveFolder, { url: url.trim() });
+      if (created === null) showToast("The live folder could not be created.");
+      break;
+    }
+    case "toggle-live-folder":
+      await runCommand(commands.toggleLiveFolder, { id: element.dataset.folderId });
+      break;
+    case "live-folder-menu":
+      showLiveFolderMenu(element.dataset.folderId, element);
+      break;
+    case "live-folder-menu-toggle": {
+      const folderId = element.dataset.folderId;
+      closePopover();
+      await runCommand(commands.toggleLiveFolder, { id: folderId });
+      break;
+    }
+    case "live-folder-refresh": {
+      const folderId = element.dataset.folderId;
+      closePopover();
+      const refreshed = await runCommand(commands.refreshLiveFolder, { id: folderId });
+      if (!refreshed) showToast("The feed was refreshed recently or could not be loaded.");
+      break;
+    }
+    case "live-folder-rename": {
+      const folderId = element.dataset.folderId;
+      const folder = state.liveFolders?.find(item => item.id === folderId);
+      closePopover({ keepModalOpen: Boolean(folder) });
+      if (!folder) break;
+      const name = await requestText({
+        title: "Rename live folder",
+        label: "Folder name",
+        value: folder.name,
+        submitLabel: "Rename",
+        maxLength: 80,
+      });
+      if (name) {
+        await runCommand(commands.renameLiveFolder, {
+          id: folder.id,
+          name: name.trim().slice(0, 80),
+        });
+      }
+      break;
+    }
+    case "live-folder-delete": {
+      const folderId = element.dataset.folderId;
+      const folder = state.liveFolders?.find(item => item.id === folderId);
+      closePopover({ keepModalOpen: Boolean(folder) });
+      if (!folder) break;
+      const confirmed = await requestConfirmation({
+        title: "Delete live folder?",
+        message: `Deleting “${folder.name}” stops refreshing its feed. Pages you opened from it stay in your tabs and history.`,
+        confirmLabel: "Delete live folder",
+      });
+      if (confirmed) await runCommand(commands.deleteLiveFolder, { id: folder.id });
+      break;
+    }
+    case "essential-reset": {
+      const tabId = element.dataset.tabId;
+      closePopover();
+      const reset = await runCommand(commands.resetEssential, { id: tabId });
+      if (!reset) showToast("This Essential has no saved page to return to.");
+      break;
+    }
+    case "essential-unload": {
+      const tabId = element.dataset.tabId;
+      closePopover();
+      const unloaded = await runCommand(commands.discardTab, { id: tabId });
+      if (!unloaded) showToast("The active Essential cannot be unloaded.");
+      break;
+    }
+    case "essential-remove": {
+      const tabId = element.dataset.tabId;
+      closePopover();
+      await runCommand(commands.toggleEssential, { id: tabId });
+      break;
+    }
+    case "site-info":
+      showSiteInfo(element);
+      break;
+    case "site-copy-url": {
+      const tab = activeTab();
+      closePopover();
+      if (tab?.url) {
+        try {
+          await navigator.clipboard.writeText(displayNavigationUrl(tab.url));
+          showToast("Address copied.");
+        } catch {
+          showToast("The address could not be copied.");
+        }
+      }
+      break;
+    }
+    case "site-clear-data": {
+      const tabId = element.dataset.tabId;
+      const tab = state.tabs.find(item => item.id === tabId);
+      closePopover({ keepModalOpen: Boolean(tab) });
+      if (!tab) break;
+      let host = "";
+      try {
+        host = new URL(tab.url).hostname;
+      } catch {
+        break;
+      }
+      const confirmed = await requestConfirmation({
+        title: "Clear site data?",
+        message: `Cookies, storage, and caches that ${host} saved in this profile will be deleted, and the page will reload. This may sign you out of the site.`,
+        confirmLabel: "Clear data",
+      });
+      if (confirmed) {
+        const cleared = await runCommand(commands.clearSiteData, { id: tab.id });
+        showToast(cleared ? `Data for ${host} was cleared.` : "Site data could not be cleared.");
+      }
+      break;
+    }
+    case "containers-menu":
+      showContainersMenu(element);
+      break;
+    case "extensions-menu":
+      showExtensionsMenu(element);
+      break;
+    case "now-playing-menu":
+      await showNowPlayingMenu(element);
+      break;
+    case "now-playing-toggle": {
+      const tabId = element.dataset.tabId;
+      const playback = await runCommand(commands.toggleMediaPlayback, { id: tabId });
+      if (playback === null) {
+        showToast("The media on that page is no longer available.");
+        closePopover();
+      } else {
+        const anchor = nowPlayingButton;
+        closePopover();
+        await showNowPlayingMenu(anchor);
+      }
+      break;
+    }
+    case "extension-open-popup": {
+      const extensionId = element.dataset.extensionId;
+      closePopover();
+      const opened = await runCommand(commands.openExtensionPopup, { id: extensionId });
+      if (!opened) showToast("This extension has no action popup.");
+      break;
+    }
+    case "extension-install": {
+      closePopover();
+      const installed = await runCommand(commands.installExtension, {});
+      if (installed === null) {
+        showToast("No extension was installed.");
+      }
+      break;
+    }
+    case "extension-reload": {
+      const extensionId = element.dataset.extensionId;
+      closePopover();
+      const reloaded = await runCommand(commands.reloadExtension, { id: extensionId });
+      if (reloaded !== true) showToast("The extension could not be reloaded.");
+      break;
+    }
+    case "extension-remove": {
+      const extensionId = element.dataset.extensionId;
+      const extension = state.extensions?.find(item => item.id === extensionId);
+      closePopover({ keepModalOpen: Boolean(extension) });
+      if (!extension) break;
+      const confirmed = await requestConfirmation({
+        title: "Remove extension?",
+        message: `Removing “${extension.name}” unloads it from the browser. The extension folder on disk is not deleted.`,
+        confirmLabel: "Remove extension",
+      });
+      if (confirmed) await runCommand(commands.removeExtension, { id: extension.id });
+      break;
+    }
+    case "container-new-tab": {
+      const containerId = element.dataset.containerId;
+      closePopover();
+      await runCommand(commands.createTab, { containerId });
+      break;
+    }
+    case "container-create": {
+      closePopover();
+      const name = await requestText({
+        title: "New container",
+        label: "Container name",
+        value: "Container",
+        submitLabel: "Create",
+        maxLength: 80,
+      });
+      if (name) await runCommand(commands.createContainer, { name });
+      break;
+    }
+    case "container-rename": {
+      const containerId = element.dataset.containerId;
+      const container = state.containers?.find(item => item.id === containerId);
+      closePopover({ keepModalOpen: Boolean(container) });
+      if (!container) break;
+      const name = await requestText({
+        title: "Rename container",
+        label: "Container name",
+        value: container.name,
+        submitLabel: "Rename",
+        maxLength: 80,
+      });
+      if (name) {
+        await runCommand(commands.renameContainer, {
+          id: container.id,
+          name: name.trim().slice(0, 80),
+        });
+      }
+      break;
+    }
+    case "container-proxy": {
+      const containerId = element.dataset.containerId;
+      const container = state.containers?.find(item => item.id === containerId);
+      closePopover({ keepModalOpen: Boolean(container) });
+      if (!container) break;
+      const value = await requestText({
+        title: "Container proxy",
+        label: "Proxy (scheme://host:port, blank for system)",
+        value: container.proxy || "",
+        submitLabel: "Save",
+        maxLength: 256,
+        allowEmpty: true,
+      });
+      if (value === null) break;
+      const applied = await runCommand(commands.setContainerProxy, {
+        id: container.id,
+        proxy: value,
+      });
+      if (!applied) {
+        showToast("Enter a proxy like socks5://host:1080 (http, https, socks4, socks5).");
+      }
+      break;
+    }
+    case "container-ua": {
+      const containerId = element.dataset.containerId;
+      const container = state.containers?.find(item => item.id === containerId);
+      closePopover({ keepModalOpen: Boolean(container) });
+      if (!container) break;
+      const value = await requestText({
+        title: "Container user agent",
+        label: "User-Agent string (blank for default)",
+        value: container.userAgent || "",
+        submitLabel: "Save",
+        maxLength: 512,
+        allowEmpty: true,
+      });
+      if (value === null) break;
+      const applied = await runCommand(commands.setContainerUserAgent, {
+        id: container.id,
+        userAgent: value,
+      });
+      if (!applied) {
+        showToast("Enter a printable User-Agent string (no control characters).");
+      }
+      break;
+    }
+    case "container-delete": {
+      const containerId = element.dataset.containerId;
+      const container = state.containers?.find(item => item.id === containerId);
+      closePopover({ keepModalOpen: Boolean(container) });
+      if (!container) break;
+      const memberCount = state.tabs.filter(tab => tab.containerId === container.id).length;
+      const tabLabel = `${memberCount} ${memberCount === 1 ? "tab" : "tabs"}`;
+      const confirmed = await requestConfirmation({
+        title: "Delete container?",
+        message: `Deleting “${container.name}” closes its ${tabLabel} and clears the container's cookies and site data. This cannot be undone.`,
+        confirmLabel: "Delete container",
+      });
+      if (confirmed) await runCommand(commands.deleteContainer, { id: container.id });
+      break;
+    }
+    case "bookmark-rename": {
+      const bookmarkId = element.dataset.bookmarkId;
+      const bookmark = state.bookmarks?.find(item => item.id === bookmarkId);
+      closePopover({ keepModalOpen: Boolean(bookmark) });
+      if (!bookmark) break;
+      const title = await requestText({
+        title: "Rename bookmark",
+        label: "Bookmark name",
+        value: bookmarkTitle(bookmark),
+        submitLabel: "Rename",
+        maxLength: 500,
+      });
+      if (title) {
+        await runCommand(commands.renameBookmark, { id: bookmark.id, title });
+      }
+      break;
+    }
+    case "bookmark-move-to-new-folder": {
+      const bookmarkId = element.dataset.bookmarkId;
+      closePopover();
+      const name = await requestText({
+        title: "New bookmark folder",
+        label: "Folder name",
+        value: "Folder",
+        submitLabel: "Create",
+        maxLength: 80,
+      });
+      if (name) {
+        await runCommand(commands.createBookmarkFolder, {
+          name,
+          bookmarkIds: [bookmarkId],
+        });
+      }
+      break;
+    }
     case "select-tab":
       closePopover();
       await runCommand(commands.selectTab, { id: tabId });
@@ -2137,6 +3282,37 @@ async function handleAction(action, element) {
       }
       break;
     }
+    case "context-discard": {
+      const discarded = await runCommand(commands.discardTab, { id: contextTabId });
+      closePopover();
+      if (discarded !== true) {
+        showToast("Active, split, and crashed tabs cannot be unloaded.");
+      }
+      break;
+    }
+    case "context-ua-mode": {
+      const mode = element.dataset.uaMode;
+      const changed = await runCommand(commands.setTabUserAgentMode, {
+        id: contextTabId,
+        mode,
+      });
+      closePopover();
+      if (!changed) showToast("The site identity could not be changed.");
+      break;
+    }
+    case "context-reopen-container": {
+      const reopenTabId = contextTabId;
+      const containerId = element.dataset.containerId || "";
+      const reopened = await runCommand(commands.reopenTabInContainer, {
+        id: reopenTabId,
+        containerId,
+      });
+      closePopover();
+      if (!reopened) {
+        showToast("Pinned, Essential, and split tabs cannot change containers.");
+      }
+      break;
+    }
     case "context-split-row":
     case "context-split-column": {
       const splitTab = state.tabs.find(tab => tab.id === contextTabId);
@@ -2194,6 +3370,15 @@ document.addEventListener("dblclick", event => {
 });
 
 document.addEventListener("contextmenu", event => {
+  const essentialItem = event.target.closest(".essential-item");
+  if (essentialItem) {
+    event.preventDefault();
+    showEssentialMenu(essentialItem.dataset.tabId, essentialItem, {
+      x: event.clientX,
+      y: event.clientY,
+    });
+    return;
+  }
   const row = event.target.closest(".tab-row, .pinned-tab");
   if (row) {
     event.preventDefault();
@@ -2559,6 +3744,13 @@ document.addEventListener("keydown", event => {
     path,
     ratio,
   });
+});
+
+document.addEventListener("dblclick", event => {
+  const divider = event.target.closest?.(".pane-divider");
+  if (!divider) return;
+  event.preventDefault();
+  void runCommand(commands.setSplitPreset, { ratio: 0.5 });
 });
 
 document.addEventListener("pointerdown", event => {
@@ -2934,7 +4126,140 @@ paneFrameLayer.addEventListener("lostpointercapture", event => {
 window.addEventListener("blur", () => {
   if (splitDividerDrag) cancelSplitDividerDrag();
   if (tabPointerDrag) finishTabPointerDrag();
+  if (bookmarkPointerDrag) finishBookmarkPointerDrag();
 });
+
+function bookmarkDropTargetAt(x, y, session) {
+  const hit = document.elementFromPoint(x, y);
+  if (!hit) return null;
+  const folderSection = hit.closest?.(".bookmark-folder");
+  if (folderSection) {
+    const folderId = folderSection.dataset.bookmarkFolderId;
+    if (session.kind === "folder" && folderId === session.id) return null;
+    return { kind: "folder", folderId, heading: folderSection.querySelector(":scope > .bookmark-folder-heading") };
+  }
+  if (hit.closest?.("#bookmarks-list")) return { kind: "top", folderId: null, heading: null };
+  return null;
+}
+
+function clearBookmarkDropHighlight() {
+  for (const heading of bookmarksList.querySelectorAll(".is-drop-target")) {
+    heading.classList.remove("is-drop-target");
+  }
+  bookmarksList.classList.remove("is-drop-top");
+}
+
+function finishBookmarkPointerDrag(commitEvent = null) {
+  const session = bookmarkPointerDrag;
+  bookmarkPointerDrag = null;
+  if (!session) return;
+  clearBookmarkDropHighlight();
+  document.body.classList.remove("is-bookmark-dragging");
+  session.sourceElement?.classList.remove("is-drag-source");
+  try {
+    appElement.releasePointerCapture(session.pointerId);
+  } catch {
+    // Synthetic pointers never held a capture.
+  }
+  if (!session.started) return;
+  suppressTabClick = true;
+  setTimeout(() => { suppressTabClick = false; }, 0);
+  if (!commitEvent) return;
+  const target = bookmarkDropTargetAt(commitEvent.clientX, commitEvent.clientY, session);
+  if (!target) return;
+  if (session.kind === "bookmark") {
+    const targetFolderId = target.kind === "folder" ? target.folderId : null;
+    if ((session.sourceFolderId || null) === targetFolderId) return;
+    void runCommand(commands.moveBookmark, {
+      id: session.id,
+      folderId: targetFolderId,
+    });
+    return;
+  }
+  const parentId = target.kind === "folder" ? target.folderId : null;
+  void runCommand(commands.moveBookmarkFolder, { id: session.id, parentId }).then(
+    moved => {
+      if (!moved) showToast("The folder cannot move there.");
+    }
+  );
+}
+
+document.addEventListener("pointerdown", event => {
+  if (event.button !== 0 || bookmarkPointerDrag || tabPointerDrag) return;
+  const bookmarkLabel = event.target.closest?.(".bookmark-open");
+  const folderHeader = event.target.closest?.(".bookmark-folder-header");
+  if (!bookmarkLabel && !folderHeader) return;
+  if (!event.target.closest?.("#bookmarks-list")) return;
+  if (bookmarkLabel) {
+    const item = bookmarkLabel.closest(".bookmark-item");
+    bookmarkPointerDrag = {
+      pointerId: event.pointerId,
+      kind: "bookmark",
+      id: item?.dataset.bookmarkId,
+      sourceFolderId: item?.closest(".bookmark-folder")?.dataset.bookmarkFolderId || null,
+      sourceElement: item,
+      startX: event.clientX,
+      startY: event.clientY,
+      started: false,
+    };
+  } else {
+    const section = folderHeader.closest(".bookmark-folder");
+    bookmarkPointerDrag = {
+      pointerId: event.pointerId,
+      kind: "folder",
+      id: section?.dataset.bookmarkFolderId,
+      sourceFolderId: null,
+      sourceElement: section,
+      startX: event.clientX,
+      startY: event.clientY,
+      started: false,
+    };
+  }
+  if (!bookmarkPointerDrag.id) bookmarkPointerDrag = null;
+});
+
+document.addEventListener("pointermove", event => {
+  const session = bookmarkPointerDrag;
+  if (!session || event.pointerId !== session.pointerId) return;
+  if ((event.buttons & 1) === 0) {
+    finishBookmarkPointerDrag();
+    return;
+  }
+  if (
+    !session.started &&
+    Math.hypot(event.clientX - session.startX, event.clientY - session.startY) < 6
+  ) {
+    return;
+  }
+  if (!session.started) {
+    session.started = true;
+    try {
+      appElement.setPointerCapture(event.pointerId);
+    } catch {
+      // Synthetic smoke pointers still drive the same state machine.
+    }
+    document.body.classList.add("is-bookmark-dragging");
+    session.sourceElement?.classList.add("is-drag-source");
+  }
+  event.preventDefault();
+  clearBookmarkDropHighlight();
+  const target = bookmarkDropTargetAt(event.clientX, event.clientY, session);
+  if (target?.heading) target.heading.classList.add("is-drop-target");
+  else if (target?.kind === "top") bookmarksList.classList.add("is-drop-top");
+});
+
+document.addEventListener("pointerup", event => {
+  if (bookmarkPointerDrag?.pointerId === event.pointerId) {
+    finishBookmarkPointerDrag(event);
+  }
+});
+
+document.addEventListener("pointercancel", event => {
+  if (bookmarkPointerDrag?.pointerId === event.pointerId) {
+    finishBookmarkPointerDrag();
+  }
+});
+
 
 addressForm.addEventListener("submit", event => {
   event.preventDefault();
@@ -3023,6 +4348,20 @@ addressForm.addEventListener("click", event => {
   event.preventDefault();
   event.stopPropagation();
 }, true);
+
+bookmarkSearchInput.addEventListener("input", () => {
+  bookmarkSearchQuery = bookmarkSearchInput.value;
+  renderBookmarks();
+});
+
+bookmarkSearchInput.addEventListener("keydown", event => {
+  if (event.key === "Escape" && bookmarkSearchInput.value) {
+    event.stopPropagation();
+    bookmarkSearchInput.value = "";
+    bookmarkSearchQuery = "";
+    renderBookmarks();
+  }
+});
 
 addressInput.addEventListener("focus", () => {
   addressDirty = false;

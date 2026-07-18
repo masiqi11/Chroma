@@ -401,6 +401,27 @@ export function insertSplitPane(
   );
 }
 
+/**
+ * Applies a ratio preset to a whole layout: the root divider takes the
+ * requested ratio while every nested divider returns to an equal 50/50, so
+ * "70/30" reads as "70% for the first side" regardless of pane count.
+ * Returns null (unchanged semantics of normalize) for empty layouts and the
+ * bare pane for single-pane layouts.
+ */
+export function applySplitRatioPreset(layout, ratio) {
+  const normalized = normalizeSplitLayout(layout);
+  if (!normalized || normalized.type !== SPLIT) return normalized;
+  const equalize = node => node.type === SPLIT
+    ? split(node.direction, equalize(node.first), equalize(node.second), 0.5)
+    : pane(node.paneId);
+  return split(
+    normalized.direction,
+    equalize(normalized.first),
+    equalize(normalized.second),
+    safeRatio(ratio)
+  );
+}
+
 export function setSplitRatio(layout, path, ratio) {
   const normalized = normalizeSplitLayout(layout);
   if (!normalized || !validPath(path) || nodeAtPath(normalized, path)?.type !== SPLIT) {

@@ -18,6 +18,37 @@ class MockSession extends EventEmitter {
   protocol = new MockProtocol();
   #userAgent = "MockBrowser/1.0 Electron/43.1.0";
 
+  constructor(partition = "") {
+    super();
+    this.partition = partition;
+    this.clearStorageDataCalls = 0;
+    const loadedExtensions = new Map();
+    let nextExtensionId = 1;
+    this.extensions = {
+      loaded: loadedExtensions,
+      failNextLoad: null,
+      loadExtension: async directory => {
+        if (this.extensions.failNextLoad) {
+          const failure = this.extensions.failNextLoad;
+          this.extensions.failNextLoad = null;
+          throw new Error(failure);
+        }
+        const extension = {
+          id: `mock-extension-${nextExtensionId++}`,
+          name: `Mock Extension ${nextExtensionId - 1}`,
+          version: "1.0.0",
+          path: directory,
+        };
+        loadedExtensions.set(extension.id, extension);
+        return extension;
+      },
+      removeExtension: id => {
+        loadedExtensions.delete(id);
+      },
+      getAllExtensions: () => [...loadedExtensions.values()],
+    };
+  }
+
   getUserAgent() {
     return this.#userAgent;
   }
@@ -37,15 +68,35 @@ class MockSession extends EventEmitter {
   setDevicePermissionHandler(handler) {
     this.devicePermissionHandler = handler;
   }
+
+  async clearStorageData() {
+    this.clearStorageDataCalls += 1;
+  }
+
+  async setProxy(config) {
+    this.proxyCalls ??= [];
+    this.proxyCalls.push(structuredClone(config));
+  }
+
+  async clearCache() {}
 }
 
-const sharedSession = new MockSession();
+const sessionsByPartition = new Map();
+
+function sessionForPartition(partition = "") {
+  let candidate = sessionsByPartition.get(partition);
+  if (!candidate) {
+    candidate = new MockSession(partition);
+    sessionsByPartition.set(partition, candidate);
+  }
+  return candidate;
+}
 
 class MockWebContents extends EventEmitter {
-  constructor() {
+  constructor(partition = "") {
     super();
     this.id = nextContentsId++;
-    this.session = sharedSession;
+    this.session = sessionForPartition(partition);
     this.navigationHistory = {
       canGoBack: () => false,
       canGoForward: () => false,
@@ -64,6 +115,8 @@ class MockWebContents extends EventEmitter {
     this.devToolsCalls = 0;
     this.windowOpenHandler = null;
     this.beforeClose = null;
+    this.executeJavaScriptCalls = [];
+    this.executeJavaScriptResult = {};
   }
 
   isDestroyed() {
@@ -107,8 +160,12 @@ class MockWebContents extends EventEmitter {
     return Promise.resolve();
   }
 
-  executeJavaScript() {
-    return Promise.resolve({});
+  executeJavaScript(code, userGesture = false) {
+    this.executeJavaScriptCalls.push({ code, userGesture });
+    if (this.executeJavaScriptResult instanceof Error) {
+      return Promise.reject(this.executeJavaScriptResult);
+    }
+    return Promise.resolve(this.executeJavaScriptResult);
   }
 
   focus() {}
@@ -142,8 +199,9 @@ class MockWebContents extends EventEmitter {
 }
 
 export class WebContentsView {
-  constructor() {
-    this._webContents = new MockWebContents();
+  constructor(options = {}) {
+    this.partition = options?.webPreferences?.partition || "";
+    this._webContents = new MockWebContents(this.partition);
     this.throwOnWebContentsAccess = false;
     this.throwOnNativeAccess = false;
     this.visible = false;
@@ -233,14 +291,40 @@ export class MockBrowserWindow {
   }
 }
 
+const registeredGlobalShortcuts = new Map();
+
 export const electronMock = {
   views: [],
   contents: [],
+  sessions: sessionsByPartition,
+  globalShortcuts: registeredGlobalShortcuts,
+  triggerGlobalShortcut(accelerator) {
+    registeredGlobalShortcuts.get(accelerator)?.();
+  },
   reset() {
     this.views.length = 0;
     this.contents.length = 0;
+    sessionsByPartition.clear();
+    registeredGlobalShortcuts.clear();
     nextContentsId = 1;
   },
+};
+
+export const globalShortcut = {
+  register(accelerator, callback) {
+    registeredGlobalShortcuts.set(accelerator, callback);
+    return true;
+  },
+  unregister(accelerator) {
+    registeredGlobalShortcuts.delete(accelerator);
+  },
+  isRegistered(accelerator) {
+    return registeredGlobalShortcuts.has(accelerator);
+  },
+};
+
+export const session = {
+  fromPartition: partition => sessionForPartition(partition),
 };
 
 export const Menu = {
@@ -249,6 +333,8 @@ export const Menu = {
 export const clipboard = { writeText: () => {} };
 export const dialog = {
   showMessageBox: async () => ({ response: 1 }),
+  showOpenDialog: async () => ({ canceled: true, filePaths: [] }),
+  showSaveDialog: async () => ({ canceled: true, filePath: "" }),
 };
 export const shell = {
   openExternal: async () => {},

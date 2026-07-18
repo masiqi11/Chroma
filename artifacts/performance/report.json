@@ -1,18 +1,18 @@
 {
   "schemaVersion": 1,
-  "timestamp": "2026-07-16T08:11:49.882Z",
-  "startedAt": "2026-07-16T08:11:44.105Z",
+  "timestamp": "2026-07-18T09:34:56.470Z",
+  "startedAt": "2026-07-18T09:34:50.223Z",
   "git": {
-    "commit": "c112407c59f71191868a6f7f0c866d009aca02bb",
+    "commit": "4ff5f7a269978f40fdeb87a08a34360807348045",
     "dirty": true
   },
   "platform": "darwin",
   "arch": "arm64",
   "osRelease": "27.0.0",
-  "node": "25.9.0",
+  "node": "22.23.1",
   "electron": "43.1.0",
   "mode": "headless-electron-performance-smoke",
-  "finishedAt": "2026-07-16T08:11:49.882Z",
+  "finishedAt": "2026-07-18T09:34:56.470Z",
   "passed": true,
   "status": "passed",
   "chromium": "150.0.7871.47",
@@ -25,22 +25,22 @@
     "maxEightTabsDeltaRssMiB": 1100
   },
   "measurements": {
-    "shellReadyMs": 857.2,
-    "firstLocalPageReadyMs": 1208,
-    "firstLocalPageAfterShellMs": 350.8,
-    "idleRssMiB": 725.5,
-    "idleRssPeakMiB": 725.5,
-    "eightTabsRssMiB": 1369.9,
-    "eightTabsRssPeakMiB": 1370.1,
-    "eightTabsDeltaRssMiB": 644.4
+    "shellReadyMs": 1291.4,
+    "firstLocalPageReadyMs": 1535.7,
+    "firstLocalPageAfterShellMs": 244.3,
+    "idleRssMiB": 750.6,
+    "idleRssPeakMiB": 757.2,
+    "eightTabsRssMiB": 1275.5,
+    "eightTabsRssPeakMiB": 1312.4,
+    "eightTabsDeltaRssMiB": 524.9
   },
   "samples": {
     "idleRssMiB": [
-      725.1,
-      725.1,
-      725.5,
-      725.5,
-      725.5
+      757.2,
+      755.3,
+      750.6,
+      748.3,
+      748.3
     ],
     "idleProcessCounts": [
       6,
@@ -50,11 +50,11 @@
       6
     ],
     "eightTabsRssMiB": [
-      1369.9,
-      1369.9,
-      1369.9,
-      1369.9,
-      1370.1
+      1312.4,
+      1282.6,
+      1275.5,
+      1266.3,
+      1256.9
     ],
     "eightTabsProcessCounts": [
       13,
